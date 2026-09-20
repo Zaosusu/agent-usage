@@ -102,7 +102,7 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--line);font-si
     <div class="meta">
       <span id="liveStatus" class="live"><i></i>实时监控中</span>
       <span><span class="dot"></span>最近扫描 <span id="scanTime" class="num">—</span></span>
-      <label class="switch"><input type="checkbox" id="auto"> 自动刷新 60s</label>
+      <label class="switch"><input type="checkbox" id="auto" checked> 自动刷新 60s</label>
       <button class="btn" id="refreshBtn" onclick="refresh()">立即刷新</button>
     </div>
   </header>
@@ -517,43 +517,9 @@ $('auto').onchange = e => {
   if (e.target.checked){ autoTimer = setInterval(refresh, 60000); toast('已开启自动刷新（60s）'); }
   else { clearInterval(autoTimer); autoTimer = null; }
 };
+// 默认开启自动刷新
+autoTimer = setInterval(refresh, 60000);
 $('rangeSel').onchange = e => { range = e.target.value; renderDaily(); };
-$('agentFilter').onchange = renderTable;
-$('searchBox').oninput = renderTable;
-function toggleMore(){ showAll = !showAll; renderTable(); }
-$('moreBtn').onclick = toggleMore;
-
-/* ---------- boot ---------- */
-(function boot(){
-  if (location.protocol === 'file:') serving = false;
-  if (!data){
-    serving = false;
-    fetch('/api/data', {cache:'no-store'}).then(r=>r.json()).then(j=>{
-      if (j.ok && j.data){ serving = true; data = j.data; render(); connectSSE(); }
-      else bootFallback();
-    }).catch(bootFallback);
-    return;
-  }
-  render();
-  if (!serving){
-    const el = $('liveStatus');
-    if (el){ el.classList.add('off'); el.innerHTML = '<i></i>文件模式（无实时推送）'; }
-    return;
-  }
-  connectSSE();
-})();
-
-function bootFallback(){
-  $('fallback').style.display = 'block';
-  $('fallback').innerHTML = '<h3 style="margin-bottom:8px">无法加载数据</h3><p>请先运行 <code>python monitor.py scan</code> 生成数据，或通过 <code>python serve.py</code> 启动后访问本页。</p>' +
-    (typeof echarts === 'undefined' ? '<p style="margin-top:8px">同时检测到 ECharts 加载失败（需联网加载 CDN），离线环境请先联网打开一次。</p>' : '');
-  document.querySelectorAll('section,.card,.agents').forEach(el=>el.style.display='none');
-}
-</script>
-
-</body>
-</html>
-e = e => { range = e.target.value; renderDaily(); };
 $('agentFilter').onchange = renderTable;
 $('searchBox').oninput = renderTable;
 function toggleMore(){ showAll = !showAll; renderTable(); }
