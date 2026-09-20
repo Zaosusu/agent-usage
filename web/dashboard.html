@@ -283,10 +283,10 @@ function renderKpis(){
   const costAgent = agents.filter(a=>a.cost);
   const estAgents = agents.filter(a=>a.est).map(a=>a.name);
   const html = `
-    <div class="kpi"><div class="lab">总 token 用量（真实）</div>
-      <div class="val">${fmt(t.real_tokens||0)}</div>
-      <div class="sub">${fmtRaw(t.real_tokens||0)} tokens</div></div>
-    <div class="kpi"><div class="lab">估算类合计（豆包/千问等）</div>
+    <div class="kpi"><div class="lab">总 token 用量</div>
+      <div class="val">${fmt(t.total_tokens||0)}</div>
+      <div class="sub">${fmtRaw(t.total_tokens||0)} tokens · 真实${fmt(t.real_tokens||0)} + 估算${fmt(t.est_tokens||0)}</div></div>
+    <div class="kpi"><div class="lab">其中：估算类（豆包/千问等）</div>
       <div class="val est">${fmt(t.est_tokens||0)}</div>
       <div class="sub">${fmtRaw(t.est_tokens||0)} tokens · 非精确计数</div></div>
     <div class="kpi"><div class="lab">会话总数</div>
