@@ -8,7 +8,7 @@
 
 校准系数：1% ≈ 50 万 token（通过 timeline + 本地 trajectory 交叉校准）
 """
-import os, re, json, urllib.request
+import os, re, json, time, urllib.request
 from engine.common import collect_strings, estimate_tokens
 
 KEY = 'doubao'
