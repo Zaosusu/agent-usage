@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
 """插件：豆包工作。
-数据来源：
-1. IndexedDB (http_127.0.0.1_5188) 的 inputTokens/outputTokens（精确）
+数据来源（本地可得部分）：
+1. IndexedDB (http_127.0.0.1_5188) 的 inputTokens/outputTokens（仅当前会话，精确）
 2. trajectory.jsonl 文本估算（兜底）
-3. Local Storage 订阅配额信息
+3. Local Storage 订阅配额（请求次数，非 token）
+
+注意：豆包是云端应用，历史 token 用量全在服务端。
+本地 IndexedDB 只缓存当前活跃会话（~25请求/65条记录），
+历史用量需从 doubao.com → 订阅与额度管理 查看。
 """
 import os, glob, json, struct
 from engine.common import estimate_tokens, iso_to_ms, collect_strings
@@ -113,6 +117,12 @@ def _scan_quota():
                 snippet = text[idx:idx+200]
                 info[kw] = snippet[:100]
     return info
+
+
+def _parse_quota_num(quota, key):
+    import re
+    m = re.search(rf'{key}["\s:]+(\d+)', quota.get(key, ''))
+    return int(m.group(1)) if m else 0
 
 
 def scan(full, need, mark):
