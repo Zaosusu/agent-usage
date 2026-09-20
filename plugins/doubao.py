@@ -3,8 +3,7 @@
 数据来源（三层校准，优先级从高到低）：
 1. timeline API 百分比（最精确）：Cookie 认证，拉全部记录累加
 2. Local Storage 订阅百分比（本地）：从 leveldb 读 usedThisPeriod/monthlyLimit
-3. IndexedDB 精确 token（当前会话）：扫 inputTokensI/outputTokensI 字段
-4. trajectory 文本估算（兜底）：扫 .sessions 目录文本量
+3. trajectory 文本估算（兜底，按日期分布）：扫 .sessions 目录，按天拆分
 
 校准系数：1% ≈ 50 万 token（通过 timeline + 本地 trajectory 交叉校准）
 """
@@ -16,20 +15,12 @@ NAME = '豆包工作'
 ESTIMATE = True
 WATCH_PATHS = ['%USERPROFILE%\\AppData\\Local\\DoubaoWork\\User Data\\Default']
 
-# 校准系数：1% ≈ 50 万 token
-# 校准依据：12 天 1171 条 = 419% ≈ 2 亿 token
 TOKENS_PER_PCT = 500_000
 
 _DEFAULT_ROOT = os.path.expanduser(WATCH_PATHS[0].replace('%USERPROFILE%', os.path.expanduser('~')))
 
 
-# ========== 数据源 1：timeline API（最精确） ==========
-
 def _fetch_timeline(cookie_str):
-    """调 timeline API 拉全部用量记录。
-    返回 (total_pct, record_count) 或 (None, None)。
-    失败自动降级，不抛异常。
-    """
     if not cookie_str:
         return None, None
     qs = ("version_code=20800&language=zh&device_platform=web"
@@ -50,7 +41,7 @@ def _fetch_timeline(cookie_str):
     count = 0
     cursor = None
     try:
-        for _ in range(100):  # 最多拉 100 页
+        for _ in range(100):
             body = json.dumps({"cursor": cursor} if cursor else {}).encode()
             url = f"https://www.doubao.com/alice/commerce/usage/timeline/?{qs}"
             req = urllib.request.Request(url, data=body, headers=headers, method="POST")
@@ -63,7 +54,7 @@ def _fetch_timeline(cookie_str):
                 u = e.get("usage", {})
                 pct_str = u.get("quota_source", {}).get("display_text", "0%")
                 if "<" in pct_str:
-                    all_pct += 0.005  # <0.01% 取中位数
+                    all_pct += 0.005
                 else:
                     try:
                         all_pct += float(pct_str.replace("%", ""))
@@ -79,13 +70,6 @@ def _fetch_timeline(cookie_str):
 
 
 def _extract_cookie():
-    """从配置文件读取用户手动提供的 cookie（可选）。
-    如果用户知道怎么从 DevTools 复制 cookie，就存到配置文件里，拿到精确的 API 数据。
-    不知道就不用管，自动降级到本地估算。
-
-    配置文件路径: ~/.doubao-usage/config.json
-    格式: {"doubao_cookie": "sessionid=xxx; passport_csrf_token=xxx; ..."}
-    """
     config_path = os.path.expanduser("~/.doubao-usage/config.json")
     if not os.path.isfile(config_path):
         return None
@@ -98,12 +82,7 @@ def _extract_cookie():
         return None
 
 
-# ========== 数据源 2：Local Storage 订阅百分比 ==========
-
 def _scan_quota():
-    """从 Local Storage leveldb 读订阅用量。
-    返回 (pct, used, limit) 或 None。
-    """
     ls_dir = os.path.join(_DEFAULT_ROOT, 'Local Storage', 'leveldb')
     if not os.path.isdir(ls_dir):
         return None
@@ -124,12 +103,7 @@ def _scan_quota():
     return None
 
 
-# ========== 数据源 3：IndexedDB 精确 token ==========
-
 def _scan_indexeddb():
-    """扫 IndexedDB 里的 inputTokens/outputTokens 字段。
-    返回 (total_in, total_out)，只覆盖当前会话。
-    """
     idb_dir = os.path.join(_DEFAULT_ROOT, 'IndexedDB')
     total_in = 0
     total_out = 0
@@ -173,17 +147,13 @@ def _scan_indexeddb():
     return total_in, total_out
 
 
-# ========== 数据源 4：trajectory 文本估算（兜底） ==========
-
-def _scan_trajectory():
-    """扫所有 session 的 trajectory.jsonl，估算文本 token 量。
-    这是最兜底的方案，数据最不精确。
-    """
+def _scan_trajectory_daily():
+    """扫 trajectory.jsonl，按日期分组返回 {date_str: token_estimate}。"""
     sess_root = os.path.join(_DEFAULT_ROOT, '.doubaowork', 'agent_mode',
                              'workspace', '.sessions')
-    total_tokens = 0
+    daily = {}
     if not os.path.isdir(sess_root):
-        return 0
+        return daily
     for root, dirs, files in os.walk(sess_root):
         for f in files:
             if f != 'trajectory.jsonl':
@@ -191,66 +161,93 @@ def _scan_trajectory():
             fp = os.path.join(root, f)
             try:
                 with open(fp, 'r', encoding='utf-8', errors='replace') as fh:
-                    texts = []
                     for line in fh:
                         line = line.strip()
                         if not line:
                             continue
                         try:
                             obj = json.loads(line)
-                            collect_strings(obj, texts, 50000)
                         except Exception:
-                            texts.append(line)
-                    total_tokens += estimate_tokens('\n'.join(texts))
+                            continue
+                        ts = 0
+                        for key in ['timestamp', 'ts', 'time', 'created_at', 'start_time']:
+                            if key in obj:
+                                v = obj[key]
+                                if isinstance(v, (int, float)):
+                                    ts = int(v)
+                                elif isinstance(v, str):
+                                    try:
+                                        ts = int(float(v))
+                                    except Exception:
+                                        pass
+                                break
+                        texts = []
+                        collect_strings(obj, texts, 50000)
+                        tok = estimate_tokens('\n'.join(texts))
+                        if ts > 0 and tok > 0:
+                            ts_sec = ts / 1000 if ts > 1e12 else ts
+                            day_str = time.strftime('%Y-%m-%d', time.localtime(ts_sec))
+                            daily[day_str] = daily.get(day_str, 0) + tok
             except Exception:
                 pass
-    return total_tokens
+    return daily
 
-
-# ========== 主入口 ==========
 
 def scan(full, need, mark):
-    # 1. 先试 API（最精确）
     cookie = _extract_cookie()
     api_pct, api_count = _fetch_timeline(cookie)
-
-    # 2. 再试 Local Storage 百分比
     quota = _scan_quota()
-
-    # 3. IndexedDB 精确 token（参考值）
     idx_in, idx_out = _scan_indexeddb()
+    daily_traj = _scan_trajectory_daily()
 
-    # 4. trajectory 文本估算（兜底）
-    traj_tokens = _scan_trajectory()
-
-    # 选择最优数据源
     if api_pct is not None and api_pct > 0:
-        # API 数据最精确
-        est_tokens = int(api_pct * TOKENS_PER_PCT)
-        title = f'豆包工作（API {api_count} 条 = {api_pct:.1f}%）'
+        total_est = int(api_pct * TOKENS_PER_PCT)
         source = 'timeline-api'
     elif quota:
-        # 本地百分比
         pct, used, limit = quota
-        est_tokens = int(pct * 100 * TOKENS_PER_PCT)
-        title = f'豆包工作（本地 {used}/{limit} 次 = {pct*100:.1f}%）'
+        total_est = int(pct * 100 * TOKENS_PER_PCT)
         source = 'local-quota'
     else:
-        # 纯文本估算
-        est_tokens = traj_tokens
-        title = '豆包工作（本地文本估算）'
+        total_est = sum(daily_traj.values())
         source = 'trajectory-estimate'
 
-    # IndexedDB 精确值作为参考，但总量用百分比校准值
-    total_tokens = max(est_tokens, idx_in + idx_out)
-
-    if total_tokens == 0:
+    if total_est == 0 and idx_in + idx_out == 0:
         return []
+
+    # 按 trajectory 日期分布拆分到每天
+    if daily_traj and total_est > 0:
+        traj_total = sum(daily_traj.values())
+        if traj_total > 0:
+            sessions = []
+            for day, traj_tok in sorted(daily_traj.items()):
+                day_tokens = int(total_est * traj_tok / traj_total)
+                if day_tokens < 1000:
+                    continue
+                ts_ms = int(time.mktime(time.strptime(day, '%Y-%m-%d')) * 1000)
+                sessions.append({
+                    'agent': KEY,
+                    'session_id': f'doubao-{day}',
+                    'title': f'豆包工作 {day}',
+                    'cwd': '',
+                    'model': 'doubao-seed',
+                    'provider': 'bytedance',
+                    'created_at': ts_ms,
+                    'last_activity_at': ts_ms + 86400000,
+                    'input_tokens': 0,
+                    'output_tokens': 0,
+                    'cache_read_tokens': 0,
+                    'cache_write_tokens': 0,
+                    'total_tokens': day_tokens,
+                    'cost': None,
+                    'est': 1,
+                    'source_file': source,
+                })
+            return sessions
 
     return [{
         'agent': KEY,
         'session_id': 'doubao-local',
-        'title': title,
+        'title': f'豆包工作（{source}）',
         'cwd': '',
         'model': 'doubao-seed',
         'provider': 'bytedance',
@@ -260,7 +257,7 @@ def scan(full, need, mark):
         'output_tokens': idx_out,
         'cache_read_tokens': 0,
         'cache_write_tokens': 0,
-        'total_tokens': total_tokens,
+        'total_tokens': max(total_est, idx_in + idx_out),
         'cost': None,
         'est': 1,
         'source_file': source,
