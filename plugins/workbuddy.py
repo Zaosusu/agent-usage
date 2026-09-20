@@ -18,7 +18,7 @@ from engine.common import ro_connect
 
 KEY = 'workbuddy'
 NAME = 'WorkBuddy'
-ESTIMATE = True          # token 数为钱折算，非本地真实计数
+ESTIMATE = False         # credit 花费是真实值，token 按均价折算但花费本身精确
 WATCH_PATHS = [
     '%USERPROFILE%\\.workbuddy\\workbuddy.db',
     '%USERPROFILE%\\.workbuddy-ai\\workbuddy.db',
@@ -76,7 +76,7 @@ def _scan_one(dbp, by_day):
             'created_at': created or 0, 'last_activity_at': last or 0,
             'input_tokens': est_tok, 'output_tokens': 0,
             'cache_read_tokens': 0, 'cache_write_tokens': 0,
-            'total_tokens': est_tok, 'cost': cost, 'est': 1,
+            'total_tokens': est_tok, 'cost': cost, 'est': 0,
             'source_file': dbp,
         })
     return out
@@ -112,6 +112,6 @@ def scan(full, need, mark):
     for dbp in dbps:
         sessions += _scan_one(dbp, by_day)
 
-    daily_rows = [{'day': d, 'tokens': t, 'est': 1, 'source_file': dbps[0]}
+    daily_rows = [{'day': d, 'tokens': t, 'est': 0, 'source_file': dbps[0]}
                   for d, t in by_day.items()]
     return {'sessions': sessions, 'daily': daily_rows, 'daily_files': daily_files}
