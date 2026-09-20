@@ -133,6 +133,10 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--line);font-si
       <h2>模型用量 TOP 15</h2>
       <div class="chart" id="modelChart"></div>
     </div>
+    <div class="card span2">
+      <h2>按项目用量（按工作目录聚合）</h2>
+      <div class="chart tall" id="projectChart"></div>
+    </div>
   </section>
 
   <section class="card">
@@ -221,14 +225,15 @@ let serving = true;
 let chartsReady = false;
 const $ = id => document.getElementById(id);
 
-let dailyChart = null, agentChart = null, modelChart = null;
+let dailyChart = null, agentChart = null, modelChart = null, projectChart = null;
 function initCharts(){
   if (!window.echarts || dailyChart) return dailyChart != null;
   try {
     dailyChart = echarts.init($('dailyChart'));
     agentChart = echarts.init($('agentChart'));
     modelChart = echarts.init($('modelChart'));
-    window.addEventListener('resize', function(){ [dailyChart, agentChart, modelChart].forEach(function(c){ c && c.resize(); }); });
+    projectChart = echarts.init($('projectChart'));
+    window.addEventListener('resize', function(){ [dailyChart, agentChart, modelChart, projectChart].forEach(function(c){ c && c.resize(); }); });
     return true;
   } catch(e){ return false; }
 }
@@ -237,6 +242,7 @@ function renderCharts(){
   if (dailyChart) renderDaily();
   if (agentChart) renderAgents();
   if (modelChart) renderModels();
+  if (projectChart) renderProjects();
 }
 function removeDegradeNote(){
   var n = document.getElementById('degradeNote');
@@ -392,6 +398,46 @@ function renderAgents(){
     filterAgent = (filterAgent===key)?'':key;
     render();
   });
+}
+
+/* ---------- project grouping ---------- */
+function renderProjects(){
+  if (!projectChart) return;
+  const sessions = (data.sessions||[]);
+  const projMap = {};
+  sessions.forEach(s => {
+    const cwd = s.cwd || '';
+    if (!cwd) return;
+    // 提取项目名：取路径最后2级作为项目标识
+    const parts = cwd.replace(/\\/g, '/').split('/').filter(Boolean);
+    let proj = parts.length >= 2 ? parts.slice(-2).join('/') : (parts[0] || cwd);
+    if (!proj) return;
+    if (!projMap[proj]) projMap[proj] = {name: proj, tokens: 0, agents: new Set(), count: 0};
+    projMap[proj].tokens += s.total_tokens || 0;
+    projMap[proj].agents.add(s.agent_name);
+    projMap[proj].count++;
+  });
+  const projects = Object.values(projMap).sort((a,b) => b.tokens - a.tokens).slice(0, 15);
+  const series = [{
+    type:'bar', barWidth:14,
+    data: projects.map(p => ({
+      value: p.tokens,
+      itemStyle:{color:'#2456D6', borderRadius:[0,5,5,0]}
+    })),
+    label:{show:true, position:'right', formatter:p=>fmt(p.value), color:'#5A6472', fontFamily:'Cascadia Mono, Consolas, monospace', fontSize:11},
+    emphasis:{focus:'self'}
+  }];
+  projectChart.setOption({
+    tooltip:{trigger:'item', formatter: p => {
+      const pr = projects[p.dataIndex];
+      return `${pr.name}<br/>总计: <b>${fmtRaw(pr.tokens)}</b> (${fmt(pr.tokens)})<br/>${pr.count} 会话 · ${Array.from(pr.agents).join(', ')}`;
+    }},
+    grid:{left:8, right:80, top:8, bottom:0, containLabel:true},
+    xAxis:{type:'value', show:false},
+    yAxis:{type:'category', inverse:true, data:projects.map(p=>p.name), axisLine:{show:false}, axisTick:{show:false},
+      axisLabel:{color:'#3A4250', fontSize:11, width:200, overflow:'truncate'}},
+    series
+  }, true);
 }
 
 /* ---------- model top ---------- */
