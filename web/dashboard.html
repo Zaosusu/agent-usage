@@ -434,7 +434,7 @@ function renderTable(){
     if (fa && s.agent!==fa) return false;
     if (q && !((s.title||'').toLowerCase().includes(q) || (s.model||'').toLowerCase().includes(q) || (s.cwd||'').toLowerCase().includes(q))) return false;
     return true;
-  });
+  }).sort((a,b) => (b.last_activity_at||0) - (a.last_activity_at||0));
   const limit = showAll ? rows.length : 100;
   rows = rows.slice(0, limit);
   $('moreBtn').textContent = showAll ? '收起' : (rows.length>=100 ? '显示全部 ('+ (data.sessions||[]).length +')' : '');
