@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -286,6 +286,7 @@ function renderKpis(){
   const sessCount = data.session_count || data.sessions.length;
   const agents = data.agents || [];
   // 今日用量
+  const days = data.days || [];
   const today = days.length ? days[days.length-1] : {};
   let todayTotal = 0;
   const todayAgents = (data.agents||[]).filter(a=>filterAgent? a.key===filterAgent : a.total_tokens>0);
@@ -613,3 +614,4 @@ function bootFallback(){
 
 </body>
 </html>
+
