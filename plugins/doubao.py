@@ -215,6 +215,9 @@ def scan(full, need, mark):
                 if day_tokens < 1000:
                     continue
                 ts_ms = int(time.mktime(time.strptime(day, '%Y-%m-%d')) * 1000)
+                # 今天的记录用当前时间，这样排在最前面
+                if day == today_str:
+                    ts_ms = int(time.time() * 1000)
                 sessions.append({
                     'agent': KEY,
                     'session_id': f'doubao-{day}',
