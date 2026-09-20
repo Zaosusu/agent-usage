@@ -19,7 +19,9 @@ html,body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-siz
 header{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:6px 0 18px}
 .brand{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:700;letter-spacing:.2px}
 .brand svg{width:26px;height:26px}
-.meta{margin-left:auto;display:flex;align-items:center;gap:10px;color:var(--ink-2);font-size:13px}
+.meta{margin-left:auto;display:flex;align-items:center;gap:14px;color:var(--ink-2);font-size:13px}
+.meta .today-usage{font-size:14px;font-weight:600;color:var(--ink)}
+.meta .today-usage .num{color:var(--accent);font-size:16px;margin-left:4px}
 .meta .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);display:inline-block;margin-right:5px}
 .live{display:inline-flex;align-items:center;gap:5px;color:var(--ok);font-weight:600;font-size:13px}
 .live i{width:8px;height:8px;border-radius:50%;background:var(--ok);animation:pulse 2s infinite}
@@ -283,15 +285,11 @@ function renderKpis(){
   const t = data.totals || {};
   const sessCount = data.session_count || data.sessions.length;
   const agents = data.agents || [];
-  // 计算当前区间平均日用量
-  const days = data.days || [];
-  const n = range === 'all' ? days.length : Math.min(parseInt(range,10), days.length);
-  const slice = days.slice(-n);
-  const aKeys = (data.agents||[]).filter(a=>filterAgent? a.key===filterAgent : a.total_tokens>0).map(a=>a.key);
-  let avgSum=0;
-  slice.forEach(d => { aKeys.forEach(k => avgSum += (d[k]||0)); });
-  const avgDaily = slice.length ? Math.round(avgSum/slice.length) : 0;
-  const rangeLabel = range==='all' ? '全部' : '近'+range+'天';
+  // 今日用量
+  const today = days.length ? days[days.length-1] : {};
+  let todayTotal = 0;
+  const todayAgents = (data.agents||[]).filter(a=>filterAgent? a.key===filterAgent : a.total_tokens>0);
+  todayAgents.forEach(a => { todayTotal += (today[a.key]||0); });
   const estAgents = agents.filter(a=>a.est).map(a=>a.name);
   const html = `
     <div class="kpi"><div class="lab">总 token 用量</div>
@@ -303,9 +301,9 @@ function renderKpis(){
     <div class="kpi"><div class="lab">会话总数</div>
       <div class="val">${sessCount.toLocaleString('en-US')}</div>
       <div class="sub">${agents.length} 个 Agent 数据源</div></div>
-    <div class="kpi"><div class="lab">平均日用量（${rangeLabel}）</div>
-      <div class="val">${fmt(avgDaily)}</div>
-      <div class="sub">${fmtRaw(avgDaily)} tokens / 天</div></div>`;
+    <div class="kpi"><div class="lab">今日用量</div>
+      <div class="val">${fmt(todayTotal)}</div>
+      <div class="sub">${fmtRaw(todayTotal)} tokens · ${today.date||''}</div></div>`;
   $('kpis').innerHTML = html;
 }
 
