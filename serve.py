@@ -113,6 +113,26 @@ class Handler(BaseHTTPRequestHandler):
                 })
             self._send_json({'ok': True, 'plugins': plugs})
             return
+        if path == '/api/hourly':
+            import sqlite3, datetime
+            db = os.path.join(core.data_dir(), 'usage.db')
+            now = datetime.datetime.now()
+            today_str = now.strftime('%Y-%m-%d')
+            hours = [{'hour': f'{h:02d}:00', 'agents': {}} for h in range(24)]
+            if os.path.exists(db):
+                con = sqlite3.connect(db)
+                start_ms = int(now.replace(hour=0,minute=0,second=0).timestamp()*1000)
+                end_ms = int(now.replace(hour=23,minute=59,second=59).timestamp()*1000)
+                rows = con.execute(
+                    "select agent, last_activity_at, total_tokens from sessions "
+                    "where last_activity_at >= ? and last_activity_at <= ?",
+                    (start_ms, end_ms)).fetchall()
+                con.close()
+                for ag, ts, tok in rows:
+                    hr = datetime.datetime.fromtimestamp(ts/1000).hour
+                    hours[hr]['agents'][ag] = hours[hr]['agents'].get(ag, 0) + (tok or 0)
+            self._send_json({'ok': True, 'date': today_str, 'hours': hours})
+            return
 
         # ===== Agent 友好接口（给 AI 调用，返回精简结构化数据） =====
         if path == '/api/agent/summary':

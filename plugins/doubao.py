@@ -207,7 +207,10 @@ def scan(full, need, mark):
         traj_total = sum(daily_traj.values())
         if traj_total > 0:
             sessions = []
+            today_str = time.strftime('%Y-%m-%d')
             for day, traj_tok in sorted(daily_traj.items()):
+                if day > today_str:
+                    continue
                 day_tokens = int(total_est * traj_tok / traj_total)
                 if day_tokens < 1000:
                     continue
@@ -220,7 +223,7 @@ def scan(full, need, mark):
                     'model': 'doubao-seed',
                     'provider': 'bytedance',
                     'created_at': ts_ms,
-                    'last_activity_at': ts_ms + 86400000,
+                    'last_activity_at': ts_ms,
                     'input_tokens': 0,
                     'output_tokens': 0,
                     'cache_read_tokens': 0,
