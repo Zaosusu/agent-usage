@@ -337,60 +337,17 @@ function renderChips(){
 }
 
 /* ---------- daily stacked ---------- */
-let hourlyCache = null;
-async function renderDaily(){
+function renderDaily(){
   if (!dailyChart) return;
-  const agents = (data.agents||[]).filter(a=>filterAgent? a.key===filterAgent : a.total_tokens>0);
-  const aKeys = agents.map(a=>a.key);
-
-  if (range === '1') {
-    // 今天：按小时展示
-    if (!hourlyCache) {
-      try {
-        const r = await fetch('/api/hourly');
-        hourlyCache = (await r.json()).hours || [];
-      } catch(e) { hourlyCache = []; }
-    }
-    const hours = hourlyCache;
-    let avgTotal = 0;
-    hours.forEach(h => { aKeys.forEach(k => avgTotal += (h.agents[k]||0)); });
-    const avgEl = document.getElementById('avgDailyLabel');
-    if (avgEl) avgEl.textContent = '今天平均: '+fmt(Math.round(avgTotal/24))+'/小时';
-    const series = agents.map(a => ({
-      name: a.name, type:'bar', stack:'t', barMaxWidth:18,
-      itemStyle:{color:colorOf(a.key), borderRadius:0},
-      emphasis:{focus:'series'},
-      data: hours.map(h => h.agents[a.key]||0)
-    }));
-    dailyChart.setOption({
-      backgroundColor:'transparent',
-      tooltip:{trigger:'axis', axisPointer:{type:'shadow'},
-        valueFormatter:v => fmtRaw(v),
-        formatter: ps => {
-          let s = ps[0].axisValue + '<br/>';
-          ps.forEach(p => { s += `<span style="display:inline-block;width:10px;height:10px;background:${p.color};border-radius:2px;margin-right:6px"></span>${p.seriesName}: <b>${fmtRaw(p.value)}</b><br/>`; });
-          const tot = ps.reduce((s,p)=>s+(p.value||0),0);
-          s += `<b>合计: ${fmtRaw(tot)}</b>`;
-          return s;
-        }},
-      legend:{show: agents.length>1, top:0, textStyle:{color:'#5A6472', fontSize:12}},
-      grid:{left:8, right:12, top:34, bottom:0, containLabel:true},
-      xAxis:{type:'category', data:hours.map(h=>h.hour),
-        axisLine:{lineStyle:{color:'#D5DAE1'}}, axisLabel:{color:'#8A93A2', fontSize:10}},
-      yAxis:{type:'value', splitLine:{lineStyle:{color:'#EEF0F3'}},
-        axisLabel:{color:'#8A93A2', fontSize:11, formatter:v=>fmt(v)}},
-      series
-    }, true);
-    return;
-  }
-
   const days = (data.days||[]);
   const n = range === 'all' ? days.length : Math.min(parseInt(range,10), days.length);
   const slice = days.slice(-n);
+  const agents = (data.agents||[]).filter(a=>filterAgent? a.key===filterAgent : a.total_tokens>0);
+  const aKeys = agents.map(a=>a.key);
   let avgTotal=0;
   slice.forEach(d => { aKeys.forEach(k => avgTotal += (d[k]||0)); });
   const avgDaily = slice.length ? Math.round(avgTotal/slice.length) : 0;
-  const rangeLabel = range==='all' ? '全部' : '近'+range+'天';
+  const rangeLabel = range==='all' ? '全部' : (range==='1' ? '今天' : '近'+range+'天');
   const avgEl = document.getElementById('avgDailyLabel');
   if (avgEl) avgEl.textContent = rangeLabel+'平均: '+fmt(avgDaily)+'/天';
   const series = agents.map(a => ({
@@ -648,7 +605,7 @@ $('auto').onchange = e => {
 };
 // 默认开启自动刷新
 autoTimer = setInterval(refresh, 60000);
-$('rangeSel').onchange = e => { range = e.target.value; hourlyCache = null; renderDaily(); };
+$('rangeSel').onchange = e => { range = e.target.value; renderDaily(); };
 $('agentFilter').onchange = () => { currentPage = 1; renderTable(); };
 $('searchBox').oninput = () => { currentPage = 1; renderTable(); };
 $('dateStart').onchange = () => { currentPage = 1; renderTable(); };
