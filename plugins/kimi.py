@@ -55,7 +55,7 @@ def _parse(path):
     return {
         'agent': KEY, 'session_id': sid,
         'title': 'Kimi 会话 ' + sid.split(os.sep)[0][:8],
-        'cwd': '', 'model': 'kimi-k2.7-code', 'provider': 'moonshot',
+        'cwd': '', 'model': 'kimi', 'provider': 'moonshot',
         'created_at': first_ts or 0, 'last_activity_at': last_ts or 0,
         'input_tokens': inp, 'output_tokens': out_t,
         'cache_read_tokens': cache_r, 'cache_write_tokens': cache_w,
