@@ -1,9 +1,9 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Agent 鐢ㄩ噺鐩戞帶</title>
+<title>Agent 用量监控</title>
 <style>
 :root{
   --bg:#F5F6F8; --card:#FFFFFF; --ink:#171C26; --ink-2:#5A6472; --ink-3:#8A93A2;
@@ -95,13 +95,11 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--line);font-si
         <rect x="2.5" y="2.5" width="19" height="19" rx="5" stroke="#2456D6" stroke-width="2"/>
         <path d="M7 15.5V8.5M12 15.5V12M17 15.5V5.5" stroke="#2456D6" stroke-width="2.2" stroke-linecap="round"/>
       </svg>
-      Agent 鐢ㄩ噺鐩戞帶
+      Agent 用量监控
     </div>
     <div class="meta">
-      <span id="liveStatus" class="live"><i></i>瀹炴椂鐩戞帶涓?/span>
-      <span><span class="dot"></span>鏈€杩戞壂鎻?<span id="scanTime" class="num">鈥?/span></span>
-      <label class="switch"><input type="checkbox" id="auto" checked> 鑷姩鍒锋柊 60s</label>
-      <button class="btn" id="refreshBtn" onclick="refresh()">绔嬪嵆鍒锋柊</button>
+      <span id="liveStatus" class="live"><i></i>实时监控中</span>
+      <span><span class="dot"></span>最近扫描 <span id="scanTime" class="num">—</span></span>
     </div>
   </header>
 
@@ -110,35 +108,35 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--line);font-si
 
   <section class="grid">
     <div class="card span2">
-      <h2>姣忔棩 token 鐢ㄩ噺
+      <h2>每日 token 用量
         <span class="ctrl">
           <span id="avgDailyLabel" style="font-size:12px;color:#8A93A2;margin-right:10px;font-weight:normal"></span>
           <select id="rangeSel">
-            <option value="1">浠婂ぉ</option>
-            <option value="7">杩?7 澶?/option>
-            <option value="14">杩?14 澶?/option>
-            <option value="30" selected>杩?30 澶?/option>
-            <option value="90">杩?90 澶?/option>
-            <option value="all">鍏ㄩ儴</option>
+            <option value="1">今天</option>
+            <option value="7">近 7 天</option>
+            <option value="14">近 14 天</option>
+            <option value="30" selected>近 30 天</option>
+            <option value="90">近 90 天</option>
+            <option value="all">全部</option>
           </select>
         </span>
       </h2>
       <div class="chart tall" id="dailyChart"></div>
     </div>
     <div class="card">
-      <h2>鍚?Agent 鎬荤敤閲?/h2>
+      <h2>各 Agent 总用量</h2>
       <div class="chart" id="agentChart"></div>
     </div>
     <div class="card">
-      <h2>妯″瀷鐢ㄩ噺 TOP 15</h2>
+      <h2>模型用量 TOP 15</h2>
       <div class="chart" id="modelChart"></div>
     </div>
     <div class="card span2">
-      <h2>鎸夐」鐩敤閲忥紙鎸夊伐浣滅洰褰曡仛鍚堬級
+      <h2>按项目用量（按工作目录聚合）
         <span class="ctrl toolbar">
-          <button class="btn" onclick="projPage(-1)" id="projPrev">涓婁竴椤?/button>
+          <button class="btn" onclick="projPage(-1)" id="projPrev">上一页</button>
           <span id="projPageInfo" style="font-size:12px;color:#5A6472"></span>
-          <button class="btn" onclick="projPage(1)" id="projNext">涓嬩竴椤?/button>
+          <button class="btn" onclick="projPage(1)" id="projNext">下一页</button>
         </span>
       </h2>
       <div class="chart tall" id="projectChart"></div>
@@ -146,13 +144,13 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--line);font-si
   </section>
 
   <section class="card">
-    <h2>浼氳瘽鏄庣粏
+    <h2>会话明细
       <span class="ctrl toolbar">
-        <select id="agentFilter"><option value="">鍏ㄩ儴 Agent</option></select>
+        <select id="agentFilter"><option value="">全部 Agent</option></select>
         <input type="date" id="dateStart" style="width:140px">
         <span style="color:#8A93A2">~</span>
         <input type="date" id="dateEnd" style="width:140px">
-        <input type="search" id="searchBox" placeholder="鎼滅储鏍囬 / 妯″瀷 / 璺緞" style="width:180px">
+        <input type="search" id="searchBox" placeholder="搜索标题 / 模型 / 路径" style="width:180px">
       </span>
     </h2>
     <div style="overflow-x:auto">
@@ -164,9 +162,9 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--line);font-si
         </colgroup>
         <thead>
           <tr>
-            <th>Agent</th><th>鏍囬</th><th>妯″瀷</th><th>鏈€杩戞椿璺?/th>
-            <th class="num">杈撳叆</th><th class="num">杈撳嚭</th><th class="num">缂撳瓨</th>
-            <th class="num">鎬昏</th><th>浼?/th>
+            <th>Agent</th><th>标题</th><th>模型</th><th>最近活跃</th>
+            <th class="num">输入</th><th class="num">输出</th><th class="num">缓存</th>
+            <th class="num">总计</th><th>估</th>
           </tr>
         </thead>
         <tbody id="sessBody"></tbody>
@@ -177,14 +175,14 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--line);font-si
 
   <div class="note" id="coverage"></div>
   <footer>
-    <span>鏁版嵁鏉ユ簮锛氬悇 Agent 鏈湴浼氳瘽/鐢ㄩ噺鏂囦欢锛堝彧璇昏В鏋愶紝涓嶄慨鏀逛换浣?Agent 鏁版嵁锛?/span>
-    <span>Codex / Claude / WorkBuddy / CodeBuddy / Kimi 涓虹湡瀹炶鏁?路 璞嗗寘 / 鍗冮棶涓轰及绠?/span>
+    <span>数据来源：各 Agent 本地会话/用量文件（只读解析，不修改任何 Agent 数据）</span>
+    <span>Codex / Claude / WorkBuddy / CodeBuddy / Kimi 为真实计数 · 豆包 / 千问为估算</span>
   </footer>
 </div>
 <div class="fallback" id="fallback"></div>
 
 <script>
-  const DATA = null;  // 杩愯鏃朵粠 /api/data 鍔犺浇
+  const DATA = null;  // 运行时从 /api/data 加载
 </script>
 <script>
 window.__EChartsReady = false;
@@ -209,15 +207,15 @@ const AGENT_ORDER = ['codex','claude','workbuddy','codebuddy','kimi','zcode','qw
 const colorOf = k => PALETTE[k] || '#8A93A2';
 
 function fmt(n){
-  if (n === null || n === undefined) return '鈥?;
+  if (n === null || n === undefined) return '—';
   n = Number(n);
   if (n < 10000) return n.toLocaleString('en-US');
-  if (n < 1e8) return (n/1e4).toFixed(1) + '涓?;
-  return (n/1e8).toFixed(2) + '浜?;
+  if (n < 1e8) return (n/1e4).toFixed(1) + '万';
+  return (n/1e8).toFixed(2) + '亿';
 }
 function fmtRaw(n){ return Number(n||0).toLocaleString('en-US'); }
 function fmtDate(ms){
-  if (!ms) return '鈥?;
+  if (!ms) return '—';
   const d = new Date(ms);
   const p = x => String(x).padStart(2,'0');
   return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes());
@@ -265,7 +263,7 @@ function ensureCharts(){
       note.id = 'degradeNote';
       note.className = 'note';
       note.style.cssText = 'grid-column:span 12;background:var(--warn-bg);border:1px solid #F2DFC4;border-radius:12px;padding:12px 16px';
-      note.innerHTML = '鍥捐〃搴擄紙ECharts CDN锛夊姞杞藉け璐ワ紝鍥捐〃鏆備笉鍙敤锛涜〃鏍间笌缁熻鏁板瓧涓嶅彈褰卞搷銆傝鑱旂綉鍚庡埛鏂版湰椤碉紝鎴栨敼鐢?<code>python serve.py</code> 璁块棶銆?;
+      note.innerHTML = '图表库（ECharts CDN）加载失败，图表暂不可用；表格与统计数字不受影响。请联网后刷新本页，或改用 <code>python serve.py</code> 访问。';
       document.querySelector('.grid').appendChild(note);
     }
   }, 6000);
@@ -285,7 +283,7 @@ function renderKpis(){
   const t = data.totals || {};
   const sessCount = data.session_count || data.sessions.length;
   const agents = data.agents || [];
-  // 璁＄畻褰撳墠鍖洪棿骞冲潎鏃ョ敤閲?
+  // 计算当前区间平均日用量
   const days = data.days || [];
   const n = range === 'all' ? days.length : Math.min(parseInt(range,10), days.length);
   const slice = days.slice(-n);
@@ -293,21 +291,21 @@ function renderKpis(){
   let avgSum=0;
   slice.forEach(d => { aKeys.forEach(k => avgSum += (d[k]||0)); });
   const avgDaily = slice.length ? Math.round(avgSum/slice.length) : 0;
-  const rangeLabel = range==='all' ? '鍏ㄩ儴' : '杩?+range+'澶?;
+  const rangeLabel = range==='all' ? '全部' : '近'+range+'天';
   const estAgents = agents.filter(a=>a.est).map(a=>a.name);
   const html = `
-    <div class="kpi"><div class="lab">鎬?token 鐢ㄩ噺</div>
+    <div class="kpi"><div class="lab">总 token 用量</div>
       <div class="val">${fmt(t.total_tokens||0)}</div>
-      <div class="sub">${fmtRaw(t.total_tokens||0)} tokens 路 鐪熷疄${fmt(t.real_tokens||0)} + 浼扮畻${fmt(t.est_tokens||0)}</div></div>
-    <div class="kpi"><div class="lab">鍏朵腑锛氫及绠楃被锛堣眴鍖?鍗冮棶绛夛級</div>
+      <div class="sub">${fmtRaw(t.total_tokens||0)} tokens · 真实${fmt(t.real_tokens||0)} + 估算${fmt(t.est_tokens||0)}</div></div>
+    <div class="kpi"><div class="lab">其中：估算类（豆包/千问等）</div>
       <div class="val est">${fmt(t.est_tokens||0)}</div>
-      <div class="sub">${fmtRaw(t.est_tokens||0)} tokens 路 闈炵簿纭鏁?/div></div>
-    <div class="kpi"><div class="lab">浼氳瘽鎬绘暟</div>
+      <div class="sub">${fmtRaw(t.est_tokens||0)} tokens · 非精确计数</div></div>
+    <div class="kpi"><div class="lab">会话总数</div>
       <div class="val">${sessCount.toLocaleString('en-US')}</div>
-      <div class="sub">${agents.length} 涓?Agent 鏁版嵁婧?/div></div>
-    <div class="kpi"><div class="lab">骞冲潎鏃ョ敤閲忥紙${rangeLabel}锛?/div>
+      <div class="sub">${agents.length} 个 Agent 数据源</div></div>
+    <div class="kpi"><div class="lab">平均日用量（${rangeLabel}）</div>
       <div class="val">${fmt(avgDaily)}</div>
-      <div class="sub">${fmtRaw(avgDaily)} tokens / 澶?/div></div>`;
+      <div class="sub">${fmtRaw(avgDaily)} tokens / 天</div></div>`;
   $('kpis').innerHTML = html;
 }
 
@@ -318,7 +316,7 @@ function renderChips(){
   const agents = data.agents || [];
   const chips = agents.map(a => {
     const active = filterAgent === a.key ? 'active' : '';
-    const badge = a.est ? '<span class="badge">浼扮畻</span>' : '';
+    const badge = a.est ? '<span class="badge">估算</span>' : '';
     return `<div class="agent-chip ${active}" data-agent="${a.key}">
       <span class="sw" style="background:${colorOf(a.key)}"></span>
       <span class="nm">${a.name}</span>
@@ -347,9 +345,9 @@ function renderDaily(){
   let avgTotal=0;
   slice.forEach(d => { aKeys.forEach(k => avgTotal += (d[k]||0)); });
   const avgDaily = slice.length ? Math.round(avgTotal/slice.length) : 0;
-  const rangeLabel = range==='all' ? '鍏ㄩ儴' : (range==='1' ? '浠婂ぉ' : '杩?+range+'澶?);
+  const rangeLabel = range==='all' ? '全部' : (range==='1' ? '今天' : '近'+range+'天');
   const avgEl = document.getElementById('avgDailyLabel');
-  if (avgEl) avgEl.textContent = rangeLabel+'骞冲潎: '+fmt(avgDaily)+'/澶?;
+  if (avgEl) avgEl.textContent = rangeLabel+'平均: '+fmt(avgDaily)+'/天';
   const series = agents.map(a => ({
     name: a.name, type:'bar', stack:'t', barMaxWidth:22,
     itemStyle:{color:colorOf(a.key), borderRadius:0},
@@ -364,7 +362,7 @@ function renderDaily(){
         let s = ps[0].axisValue + '<br/>';
         ps.forEach(p => { s += `<span style="display:inline-block;width:10px;height:10px;background:${p.color};border-radius:2px;margin-right:6px"></span>${p.seriesName}: <b>${fmtRaw(p.value)}</b> (${fmt(p.value)})<br/>`; });
         const tot = ps.reduce((s,p)=>s+(p.value||0),0);
-        s += `<b>褰撴棩鍚堣: ${fmtRaw(tot)} (${fmt(tot)})</b>`;
+        s += `<b>当日合计: ${fmtRaw(tot)} (${fmt(tot)})</b>`;
         return s;
       }},
     legend:{show: agents.length>1, top:0, textStyle:{color:'#5A6472', fontSize:12}},
@@ -395,7 +393,7 @@ function renderAgents(){
   }];
   agentChart.setOption({
     tooltip:{trigger:'item',
-      formatter: p => `${p.name}<br/>鎬昏: <b>${fmtRaw(p.value)}</b> (${fmt(p.value)})<br/><span style="color:#8A93A2">鐐瑰嚮绛涢€夎 Agent</span>`},
+      formatter: p => `${p.name}<br/>总计: <b>${fmtRaw(p.value)}</b> (${fmt(p.value)})<br/><span style="color:#8A93A2">点击筛选该 Agent</span>`},
     grid:{left:8, right:70, top:8, bottom:0, containLabel:true},
     xAxis:{type:'value', show:false, max:yMax},
     yAxis:{type:'category', inverse:true, data:names, axisLine:{show:false}, axisTick:{show:false},
@@ -419,7 +417,7 @@ function renderProjects(){
   sessions.forEach(s => {
     const cwd = s.cwd || '';
     if (!cwd) return;
-    // 鎻愬彇椤圭洰鍚嶏細鍙栬矾寰勬渶鍚?绾т綔涓洪」鐩爣璇?
+    // 提取项目名：取路径最后2级作为项目标识
     const parts = cwd.replace(/\\/g, '/').split('/').filter(Boolean);
     let proj = parts.length >= 2 ? parts.slice(-2).join('/') : (parts[0] || cwd);
     if (!proj) return;
@@ -441,7 +439,7 @@ function renderProjects(){
   projectChart.setOption({
     tooltip:{trigger:'item', formatter: p => {
       const pr = projects[p.dataIndex];
-      return `${pr.name}<br/>鎬昏: <b>${fmtRaw(pr.tokens)}</b> (${fmt(pr.tokens)})<br/>${pr.count} 浼氳瘽 路 ${Array.from(pr.agents).join(', ')}`;
+      return `${pr.name}<br/>总计: <b>${fmtRaw(pr.tokens)}</b> (${fmt(pr.tokens)})<br/>${pr.count} 会话 · ${Array.from(pr.agents).join(', ')}`;
     }},
     grid:{left:8, right:80, top:8, bottom:0, containLabel:true},
     xAxis:{type:'value', show:false},
@@ -467,7 +465,7 @@ function renderModels(){
   modelChart.setOption({
     tooltip:{trigger:'item', formatter: p => {
       const m = models[p.dataIndex];
-      return `${m.agent==='(鏈煡)'?'':(data.agents||[]).find(a=>a.key===m.agent)?.name+' 路 '}${m.model}<br/>${fmtRaw(p.value)} tokens (${fmt(p.value)}) 路 ${m.count} 浼氳瘽`;
+      return `${m.agent==='(未知)'?'':(data.agents||[]).find(a=>a.key===m.agent)?.name+' · '}${m.model}<br/>${fmtRaw(p.value)} tokens (${fmt(p.value)}) · ${m.count} 会话`;
     }},
     grid:{left:8, right:64, top:8, bottom:0, containLabel:true},
     xAxis:{type:'value', show:false},
@@ -487,7 +485,7 @@ function getFilteredSessions(){
   if (filterSel.options.length <= 1){
     agents.forEach(a => {
       const o = document.createElement('option');
-      o.value = a.key; o.textContent = a.name + (a.est?' (浼扮畻)':'');
+      o.value = a.key; o.textContent = a.name + (a.est?' (估算)':'');
       filterSel.appendChild(o);
     });
   }
@@ -519,23 +517,23 @@ function renderTable(){
   $('sessBody').innerHTML = pageRows.map(s => `
     <tr>
       <td><span class="ag"><i style="background:${colorOf(s.agent)}"></i>${s.agent_name}</span></td>
-      <td class="title-cell" title="${(s.title||'').replace(/"/g,'&quot;')}">${s.title||'鈥?}</td>
-      <td title="${s.model||''}">${s.model||'鈥?}</td>
+      <td class="title-cell" title="${(s.title||'').replace(/"/g,'&quot;')}">${s.title||'—'}</td>
+      <td title="${s.model||''}">${s.model||'—'}</td>
       <td class="num">${fmtDate(s.last_activity_at)}</td>
       <td class="num">${fmtRaw(s.input_tokens)}</td>
       <td class="num">${fmtRaw(s.output_tokens)}</td>
       <td class="num">${fmtRaw((s.cache_read_tokens||0)+(s.cache_write_tokens||0))}</td>
       <td class="num" style="font-weight:600">${fmt(s.total_tokens)}</td>
-      <td class="est-cell">${s.est?'浼扮畻':''}</td>
+      <td class="est-cell">${s.est?'估算':''}</td>
     </tr>`).join('');
   // pager
   const pager = $('pager');
   pager.innerHTML = `
-    <button class="btn" onclick="gotoPage(1)" ${currentPage<=1?'disabled':''}>棣栭〉</button>
-    <button class="btn" onclick="gotoPage(${currentPage-1})" ${currentPage<=1?'disabled':''}>涓婁竴椤?/button>
-    <span>绗?${currentPage} / ${totalPages} 椤碉紙鍏?${rows.length} 鏉★級</span>
-    <button class="btn" onclick="gotoPage(${currentPage+1})" ${currentPage>=totalPages?'disabled':''}>涓嬩竴椤?/button>
-    <button class="btn" onclick="gotoPage(${totalPages})" ${currentPage>=totalPages?'disabled':''}>鏈〉</button>
+    <button class="btn" onclick="gotoPage(1)" ${currentPage<=1?'disabled':''}>首页</button>
+    <button class="btn" onclick="gotoPage(${currentPage-1})" ${currentPage<=1?'disabled':''}>上一页</button>
+    <span>第 ${currentPage} / ${totalPages} 页（共 ${rows.length} 条）</span>
+    <button class="btn" onclick="gotoPage(${currentPage+1})" ${currentPage>=totalPages?'disabled':''}>下一页</button>
+    <button class="btn" onclick="gotoPage(${totalPages})" ${currentPage>=totalPages?'disabled':''}>末页</button>
   `;
 }
 function gotoPage(p){ currentPage = p; renderTable(); }
@@ -544,38 +542,21 @@ function gotoPage(p){ currentPage = p; renderTable(); }
 function renderCoverage(){
   const cov = data.coverage||[];
   const notes = cov.map(c => {
-    if (c.status==='empty') return `<code>${c.name}</code>锛?{c.note}`;
-    if (c.status==='estimate') return `<code>${c.name}</code>锛?{c.note}`;
+    if (c.status==='empty') return `<code>${c.name}</code>：${c.note}`;
+    if (c.status==='estimate') return `<code>${c.name}</code>：${c.note}`;
     return '';
-  }).filter(Boolean).join('銆€路銆€');
-  $('coverage').innerHTML = notes ? '瑕嗙洊璇存槑锛? + notes : '';
+  }).filter(Boolean).join('　·　');
+  $('coverage').innerHTML = notes ? '覆盖说明：' + notes : '';
 }
 
 function render(){
   if (!data) return;
   renderKpis(); renderChips(); renderTable(); renderCoverage();
-  $('scanTime').textContent = data.generated_at_str || '鈥?;
+  $('scanTime').textContent = data.generated_at_str || '—';
   ensureCharts();
 }
 
-/* ---------- refresh ---------- */
-async function refresh(){
-  if (!serving){
-    toast('file:// 妯″紡鏃犳硶鍦ㄧ嚎鍒锋柊锛岃杩愯 python serve.py 鍚庢墦寮€ http://127.0.0.1:8765/');
-    return;
-  }
-  const btn = $('refreshBtn');
-  btn.disabled = true; btn.textContent = '鎵弿涓€?;
-  try {
-    const r = await fetch('/api/refresh', {cache:'no-store'});
-    const j = await r.json();
-    if (j.ok){ toast('鎵弿宸茶Е鍙戯紝缁撴灉灏嗚嚜鍔ㄦ帹閫?); }
-    else toast('鍒锋柊澶辫触锛? + (j.error||'鏈煡閿欒'));
-  } catch(e){ toast('鍒锋柊澶辫触锛? + e.message); }
-  btn.disabled = false; btn.textContent = '绔嬪嵆鍒锋柊';
-}
-
-/* ---------- 瀹炴椂鎺ㄩ€侊紙SSE锛?---------- */
+/* ---------- 实时推送（SSE） ---------- */
 let evtSource = null;
 function connectSSE(){
   if (!serving || evtSource) return;
@@ -584,27 +565,20 @@ function connectSSE(){
     evtSource.addEventListener('update', function(e){
       try {
         const j = JSON.parse(e.data);
-        if (j && j.ok && j.data){ data = j.data; render(); toast('宸插疄鏃舵洿鏂帮細' + data.generated_at_str); }
+        if (j && j.ok && j.data){ data = j.data; render(); toast('已实时更新：' + data.generated_at_str); }
       } catch(_){}
     });
     evtSource.onopen = function(){
       const el = $('liveStatus');
-      if (el){ el.classList.remove('off'); el.innerHTML = '<i></i>瀹炴椂鐩戞帶涓?; }
+      if (el){ el.classList.remove('off'); el.innerHTML = '<i></i>实时监控中'; }
     };
     evtSource.onerror = function(){
       const el = $('liveStatus');
-      if (el && evtSource.readyState === EventSource.CLOSED){ el.classList.add('off'); el.innerHTML = '<i></i>瀹炴椂杩炴帴鏂紑锛堣嚜鍔ㄩ噸杩炰腑锛?; }
+      if (el && evtSource.readyState === EventSource.CLOSED){ el.classList.add('off'); el.innerHTML = '<i></i>实时连接断开（自动重连中）'; }
     };
   } catch(_){}
 }
-$('refreshBtn').onclick = refresh;
-let autoTimer = null;
-$('auto').onchange = e => {
-  if (e.target.checked){ autoTimer = setInterval(refresh, 60000); toast('宸插紑鍚嚜鍔ㄥ埛鏂帮紙60s锛?); }
-  else { clearInterval(autoTimer); autoTimer = null; }
-};
-// 榛樿寮€鍚嚜鍔ㄥ埛鏂?
-autoTimer = setInterval(refresh, 60000);
+
 $('rangeSel').onchange = e => { range = e.target.value; renderDaily(); };
 $('agentFilter').onchange = () => { currentPage = 1; renderTable(); };
 $('searchBox').oninput = () => { currentPage = 1; renderTable(); };
@@ -625,7 +599,7 @@ $('dateEnd').onchange = () => { currentPage = 1; renderTable(); };
   render();
   if (!serving){
     const el = $('liveStatus');
-    if (el){ el.classList.add('off'); el.innerHTML = '<i></i>鏂囦欢妯″紡锛堟棤瀹炴椂鎺ㄩ€侊級'; }
+    if (el){ el.classList.add('off'); el.innerHTML = '<i></i>文件模式（无实时推送）'; }
     return;
   }
   connectSSE();
@@ -633,8 +607,8 @@ $('dateEnd').onchange = () => { currentPage = 1; renderTable(); };
 
 function bootFallback(){
   $('fallback').style.display = 'block';
-  $('fallback').innerHTML = '<h3 style="margin-bottom:8px">鏃犳硶鍔犺浇鏁版嵁</h3><p>璇峰厛杩愯 <code>python monitor.py scan</code> 鐢熸垚鏁版嵁锛屾垨閫氳繃 <code>python serve.py</code> 鍚姩鍚庤闂湰椤点€?/p>' +
-    (typeof echarts === 'undefined' ? '<p style="margin-top:8px">鍚屾椂妫€娴嬪埌 ECharts 鍔犺浇澶辫触锛堥渶鑱旂綉鍔犺浇 CDN锛夛紝绂荤嚎鐜璇峰厛鑱旂綉鎵撳紑涓€娆°€?/p>' : '');
+  $('fallback').innerHTML = '<h3 style="margin-bottom:8px">无法加载数据</h3><p>请先运行 <code>python monitor.py scan</code> 生成数据，或通过 <code>python serve.py</code> 启动后访问本页。</p>' +
+    (typeof echarts === 'undefined' ? '<p style="margin-top:8px">同时检测到 ECharts 加载失败（需联网加载 CDN），离线环境请先联网打开一次。</p>' : '');
   document.querySelectorAll('section,.card,.agents').forEach(el=>el.style.display='none');
 }
 </script>
