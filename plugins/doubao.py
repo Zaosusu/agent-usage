@@ -160,34 +160,22 @@ def _scan_trajectory_daily():
                 continue
             fp = os.path.join(root, f)
             try:
+                mtime = os.path.getmtime(fp)
+                day_str = time.strftime('%Y-%m-%d', time.localtime(mtime))
                 with open(fp, 'r', encoding='utf-8', errors='replace') as fh:
+                    texts = []
                     for line in fh:
                         line = line.strip()
                         if not line:
                             continue
                         try:
                             obj = json.loads(line)
+                            collect_strings(obj, texts, 50000)
                         except Exception:
-                            continue
-                        ts = 0
-                        for key in ['timestamp', 'ts', 'time', 'created_at', 'start_time']:
-                            if key in obj:
-                                v = obj[key]
-                                if isinstance(v, (int, float)):
-                                    ts = int(v)
-                                elif isinstance(v, str):
-                                    try:
-                                        ts = int(float(v))
-                                    except Exception:
-                                        pass
-                                break
-                        texts = []
-                        collect_strings(obj, texts, 50000)
-                        tok = estimate_tokens('\n'.join(texts))
-                        if ts > 0 and tok > 0:
-                            ts_sec = ts / 1000 if ts > 1e12 else ts
-                            day_str = time.strftime('%Y-%m-%d', time.localtime(ts_sec))
-                            daily[day_str] = daily.get(day_str, 0) + tok
+                            texts.append(line)
+                    tok = estimate_tokens('\n'.join(texts))
+                if tok > 0:
+                    daily[day_str] = daily.get(day_str, 0) + tok
             except Exception:
                 pass
     return daily
