@@ -114,6 +114,7 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--line);font-si
     <div class="card span2">
       <h2>每日 token 用量
         <span class="ctrl">
+          <span id="avgDailyLabel" style="font-size:12px;color:#8A93A2;margin-right:10px;font-weight:normal"></span>
           <select id="rangeSel">
             <option value="14">近 14 天</option>
             <option value="30" selected>近 30 天</option>
@@ -212,7 +213,6 @@ function fmtDate(ms){
 let data = (DATA && typeof DATA === 'object') ? DATA : null;
 let filterAgent = '';
 let range = '30';
-let avgRange = '14';
 let showAll = false;
 let serving = true;
 let chartsReady = false;
@@ -273,15 +273,6 @@ function renderKpis(){
   const cost = agents.reduce((s,a)=>s+(a.cost||0),0);
   const costAgent = agents.filter(a=>a.cost);
   const estAgents = agents.filter(a=>a.est).map(a=>a.name);
-  // 计算平均日用量
-  const days = data.days||[];
-  const avgN = avgRange==='all' ? days.length : Math.min(parseInt(avgRange,10), days.length);
-  const avgSlice = days.slice(-avgN);
-  const aKeys = agents.map(a=>a.key);
-  let avgTotal=0;
-  avgSlice.forEach(d => { aKeys.forEach(k => avgTotal += (d[k]||0)); });
-  const avgDaily = avgSlice.length ? Math.round(avgTotal/avgSlice.length) : 0;
-  const avgLabel = avgRange==='all' ? '全部' : avgRange+'天';
   const html = `
     <div class="kpi"><div class="lab">总 token 用量（真实）</div>
       <div class="val">${fmt(t.real_tokens||0)}</div>
@@ -294,19 +285,11 @@ function renderKpis(){
       <div class="sub">${agents.length} 个 Agent 数据源</div></div>
     <div class="kpi"><div class="lab">WorkBuddy 费用</div>
       <div class="val" style="color:${costAgent.length?'var(--ok)':'inherit'}">${cost>0?cost.toFixed(2):'—'}</div>
-      <div class="sub">${costAgent.length?costAgent.map(a=>a.name+' credit').join(' · '):'本地无费用记录'}${estAgents.length?' · 估算:'+estAgents.join('/'):''}</div></div>
-    <div class="kpi"><div class="lab">平均日用量（${avgLabel}）</div>
-      <div class="val">${fmt(avgDaily)}</div>
-      <div class="sub">${fmtRaw(avgDaily)} tokens/天
-        &nbsp; <a href="#" onclick="setAvg('7')" style="color:${avgRange==='7'?'var(--ok)':'#8A93A2'};text-decoration:none">7天</a>
-        / <a href="#" onclick="setAvg('14')" style="color:${avgRange==='14'?'var(--ok)':'#8A93A2'};text-decoration:none">14天</a>
-        / <a href="#" onclick="setAvg('all')" style="color:${avgRange==='all'?'var(--ok)':'#8A93A2'};text-decoration:none">全部</a>
-      </div></div>`;
+      <div class="sub">${costAgent.length?costAgent.map(a=>a.name+' credit').join(' · '):'本地无费用记录'}${estAgents.length?' · 估算:'+estAgents.join('/'):''}</div></div>`;
   $('kpis').innerHTML = html;
 }
 
 
-function setAvg(n){ avgRange = n; renderKpis(); }
 
 /* ---------- agent chips ---------- */
 function renderChips(){
@@ -339,6 +322,14 @@ function renderDaily(){
   const n = range === 'all' ? days.length : Math.min(parseInt(range,10), days.length);
   const slice = days.slice(-n);
   const agents = (data.agents||[]).filter(a=>filterAgent? a.key===filterAgent : a.total_tokens>0);
+  // 计算当前区间平均日用量
+  const aKeys = agents.map(a=>a.key);
+  let avgTotal=0;
+  slice.forEach(d => { aKeys.forEach(k => avgTotal += (d[k]||0)); });
+  const avgDaily = slice.length ? Math.round(avgTotal/slice.length) : 0;
+  const rangeLabel = range==='all' ? '全部' : '近'+range+'天';
+  const avgEl = document.getElementById('avgDailyLabel');
+  if (avgEl) avgEl.textContent = rangeLabel+'平均: '+fmt(avgDaily)+'/天';
   const series = agents.map(a => ({
     name: a.name, type:'bar', stack:'t', barMaxWidth:22,
     itemStyle:{color:colorOf(a.key), borderRadius:0},

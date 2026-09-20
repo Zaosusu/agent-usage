@@ -6,7 +6,8 @@
 
 ## 功能
 
-- 总用量 KPI、每日趋势堆叠柱、各 Agent 对比、模型 TOP15、会话明细
+- 总用量 KPI、每日趋势堆叠柱（含区间平均日用量）、各 Agent 对比、模型 TOP15、会话明细
+- 区间平均日用量：选近14天/30天/90天/全部，自动算对应区间日均
 - 实时推送（SSE），数据源变化即自动刷新
 - 单文件 exe，无需安装 Python
 - 本地运行，数据不上传
@@ -25,17 +26,17 @@ agent-usage.exe [--port 8765] [--no-open] [--interval 5] [--full]
 
 ## 内置 Agent 支持
 
-| Agent | 精确度 | 数据源 |
-| --- | --- | --- |
-| Codex / Claude | 精确 | CC Switch `proxy_request_logs` |
-| Kimi Code | 精确 | `~/.kimi/sessions/**/wire.jsonl` |
-| WorkBuddy | 精确+费用 | `~/.workbuddy/workbuddy.db` |
-| CodeBuddy | 精确 | `~/.codebuddy/projects/**/*.jsonl` |
-| 豆包工作 | 估算 | IndexedDB + 会话轨迹 |
-| 千问工作 | 估算 | `~/.qwenworkcn/projects/**/*.jsonl` |
-| ZCode | 精确 | `~/.zcode/cli/db/db.sqlite` |
+| Agent | 精确度 | 数据源 | 说明 |
+| --- | --- | --- | --- |
+| Codex / Claude | 精确 | CC Switch `proxy_request_logs` | 代理层记录每次请求的 input/output/cache tokens |
+| Kimi Code | 精确 | `~/.kimi/sessions/**/wire.jsonl` | 本地 wire 协议含 token_usage |
+| WorkBuddy | 估算 | `~/.workbuddy/workbuddy.db` | credit 花费按 ¥2/百万 tokens 折算 |
+| CodeBuddy | 估算 | `~/.codebuddy/projects/**/*.jsonl` | 文本长度估算 |
+| 豆包工作 | 估算 | IndexedDB + 会话轨迹 | 云端应用，本地只缓存当前会话，历史在服务端 |
+| 千问工作 | 估算 | `~/.qwenworkcn/projects/**/*.jsonl` | jsonl 无 usage 字段，文本长度估算 |
+| ZCode | 精确 | `~/.zcode/cli/db/db.sqlite` | 本地 SQLite 用量记录 |
 
-> 云端 Agent（豆包/千问）的 token 计费在服务端，本地不落账，只能估算。
+> 标"估算"的 Agent 本地没有精确 token 用量，按文本长度或费用折算，仅供参考。
 
 ## 接入新 Agent
 
