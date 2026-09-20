@@ -115,7 +115,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == '/api/hourly':
             import sqlite3, datetime
-            db = os.path.join(core.data_dir(), 'usage.db')
+            db = core.DB_PATH
             now = datetime.datetime.now()
             today_str = now.strftime('%Y-%m-%d')
             hours = [{'hour': f'{h:02d}:00', 'agents': {}} for h in range(24)]
