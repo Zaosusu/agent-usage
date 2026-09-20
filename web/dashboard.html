@@ -132,7 +132,13 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--line);font-si
       <div class="chart" id="modelChart"></div>
     </div>
     <div class="card span2">
-      <h2>按项目用量（按工作目录聚合）</h2>
+      <h2>按项目用量（按工作目录聚合）
+        <span class="ctrl toolbar">
+          <button class="btn" onclick="projPage(-1)" id="projPrev">上一页</button>
+          <span id="projPageInfo" style="font-size:12px;color:#5A6472"></span>
+          <button class="btn" onclick="projPage(1)" id="projNext">下一页</button>
+        </span>
+      </h2>
       <div class="chart tall" id="projectChart"></div>
     </div>
   </section>
