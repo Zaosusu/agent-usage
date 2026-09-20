@@ -11,6 +11,9 @@ proxy_request_logs 表记录了每一次请求的精确 token 数（含缓存命
     total_cost_usd, session_id
 """
 import os
+import re
+import json
+import glob
 import time
 import collections
 from engine.common import ro_connect
@@ -25,6 +28,52 @@ APP_TO_AGENT = {
     'codex': 'codex',
     'claude': 'claude',
 }
+
+_CODEX_ROLLOUT_ROOT = os.path.expanduser('~/.codex/sessions')
+_CLAUDE_PROJECTS_ROOT = os.path.expanduser('~/.claude/projects')
+_sid_cwd_cache = None
+
+
+def _build_sid_cwd_map():
+    """从 Codex rollout 文件和 Claude 项目目录提取 session_id -> cwd 映射。"""
+    global _sid_cwd_cache
+    if _sid_cwd_cache is not None:
+        return _sid_cwd_cache
+    m = {}
+    # Codex: rollout-<ts>-<uuid>.jsonl
+    if os.path.isdir(_CODEX_ROLLOUT_ROOT):
+        for fp in glob.glob(os.path.join(_CODEX_ROLLOUT_ROOT, '**', '*.jsonl'), recursive=True):
+            fname = os.path.basename(fp)
+            mm = re.search(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', fname)
+            if not mm:
+                continue
+            sid = mm.group(1)
+            try:
+                with open(fp, 'r', encoding='utf-8', errors='replace') as f:
+                    for line in f:
+                        try:
+                            obj = json.loads(line.strip())
+                            if obj.get('type') == 'session_meta':
+                                cwd = obj.get('payload', {}).get('cwd', '')
+                                if cwd:
+                                    m[sid] = cwd
+                                break
+                        except:
+                            continue
+            except:
+                pass
+    # Claude: projects/<encoded_path>/<uuid>.jsonl
+    if os.path.isdir(_CLAUDE_PROJECTS_ROOT):
+        for proj_dir in os.listdir(_CLAUDE_PROJECTS_ROOT):
+            proj_path = os.path.join(_CLAUDE_PROJECTS_ROOT, proj_dir)
+            if not os.path.isdir(proj_path):
+                continue
+            decoded = proj_dir.replace('--', ':\\').replace('-', '\\')
+            for jf in glob.glob(os.path.join(proj_path, '*.jsonl')):
+                sid = os.path.basename(jf).replace('.jsonl', '')
+                m[sid] = decoded
+    _sid_cwd_cache = m
+    return m
 
 
 def _db_path():
@@ -99,8 +148,12 @@ def scan(full, need, mark):
         })
 
     sessions = []
+    cwd_map = _build_sid_cwd_map()
     for s in sess.values():
         s['cost'] = round(s['cost'], 4)
+        # 从 rollout 文件补 cwd
+        if not s['cwd'] and s['session_id'] in cwd_map:
+            s['cwd'] = cwd_map[s['session_id']]
         if s['total_tokens'] > 0:
             sessions.append(s)
 
