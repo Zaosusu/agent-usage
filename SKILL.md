@@ -1,11 +1,11 @@
 ---
-name: agent-usage
+name: agent-usage-skill
 description: 监控你电脑上所有 AI Agent（Codex、Claude Code、Kimi、WorkBuddy、豆包工作等）的 token 用量。当用户问"我用了多少 token"、"我的额度怎么消耗的"、"哪个 AI 用最多"、"我的 AI 用量统计"时使用。
 ---
 
-# Agent Usage Monitor
+# Agent Usage Skill
 
-本地多 AI Agent Token 用量统一监控工具。插件化架构，任何 AI 编程工具都能接入。
+本地多 AI Agent Token 用量统一监控 Skill。插件化架构，任何 AI 编程工具都能接入。
 
 ## 什么时候用
 

@@ -1,6 +1,6 @@
 ﻿# -*- coding: utf-8 -*-
 """
-app.py — agent-usage 统一入口（开发与打包共用）。
+app.py — agent-usage-skill 统一入口（开发与打包共用）。
 双击 / 运行本程序后：
   1. 若无数据则先全量扫描一次；
   2. 启动本地服务（默认 http://127.0.0.1:8765/）；
@@ -21,7 +21,7 @@ import serve
 
 
 def main():
-    ap = argparse.ArgumentParser(description='agent-usage')
+    ap = argparse.ArgumentParser(description='agent-usage-skill')
     ap.add_argument('--port', type=int, default=8765)
     ap.add_argument('--no-open', action='store_true')
     ap.add_argument('--interval', type=float, default=5.0)
@@ -29,7 +29,7 @@ def main():
     args = ap.parse_args()
 
     print('=' * 56)
-    print('  agent-usage')
+    print('  agent-usage-skill')
     print('=' * 56)
     print('数据目录:', core.DATA_DIR)
     print('插件目录:', core.plugin_dirs())

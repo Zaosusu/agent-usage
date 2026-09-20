@@ -1,8 +1,8 @@
-﻿# agent-usage
+﻿# agent-usage-skill
 
-> 本地多 AI Agent Token 用量统一监控看板
+> 本地多 AI Agent Token 用量统一监控 Skill
 
-监控你电脑上所有 AI Agent 的 token 用量，统一看板展示。**插件化架构**——装了新 Agent，丢一个插件文件就能接入；**实时监控**——数据源一变，看板自动刷新；**Agent 友好**——留了结构化 API，AI 可以直接调用。
+监控你电脑上所有 AI Agent 的 token 用量，统一看板展示。**插件化架构**——装了新 Agent，丢一个插件文件就能接入；**实时监控**——数据源一变，看板自动刷新；**Skill 接口**——写了 SKILL.md，任何 AI 都能自动发现并调用。
 
 ## 功能
 

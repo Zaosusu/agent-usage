@@ -1,8 +1,8 @@
 ﻿@echo off
 REM ============================================================
-REM  agent-usage - Windows build script
+REM  agent-usage-skill - Windows build script
 REM  Usage: double-click or run build.bat in terminal
-REM  Output: dist\agent-usage.exe (single file)
+REM  Output: dist\agent-usage-skill.exe (single file)
 REM ============================================================
 cd /d "%~dp0"
 
@@ -15,7 +15,7 @@ if exist dist rmdir /s /q dist
 
 echo [3/3] Building (web + plugins bundled)...
 python -m PyInstaller --noconfirm --clean --onefile --console ^
-  --name agent-usage ^
+  --name agent-usage-skill ^
   --add-data "web;web" ^
   --add-data "plugins;plugins_internal" ^
   --exclude-module pandas ^
@@ -23,6 +23,6 @@ python -m PyInstaller --noconfirm --clean --onefile --console ^
   app.py
 
 echo.
-echo Done! Output: dist\agent-usage.exe
+echo Done! Output: dist\agent-usage-skill.exe
 echo Copy the exe anywhere and double-click to run.
 pause
