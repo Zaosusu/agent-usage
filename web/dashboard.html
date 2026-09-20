@@ -283,13 +283,15 @@ function renderKpis(){
   const t = data.totals || {};
   const sessCount = data.session_count || data.sessions.length;
   const agents = data.agents || [];
-  const today = new Date().toISOString().slice(0,10);
-  const todayTokens = (data.sessions||[]).filter(s => {
-    if (!s.last_activity_at) return false;
-    const d = new Date(s.last_activity_at);
-    const dd = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
-    return dd === today;
-  }).reduce((s,x) => s + (x.total_tokens||0), 0);
+  // 计算当前区间平均日用量
+  const days = data.days || [];
+  const n = range === 'all' ? days.length : Math.min(parseInt(range,10), days.length);
+  const slice = days.slice(-n);
+  const aKeys = (data.agents||[]).filter(a=>filterAgent? a.key===filterAgent : a.total_tokens>0).map(a=>a.key);
+  let avgSum=0;
+  slice.forEach(d => { aKeys.forEach(k => avgSum += (d[k]||0)); });
+  const avgDaily = slice.length ? Math.round(avgSum/slice.length) : 0;
+  const rangeLabel = range==='all' ? '全部' : '近'+range+'天';
   const estAgents = agents.filter(a=>a.est).map(a=>a.name);
   const html = `
     <div class="kpi"><div class="lab">总 token 用量</div>
@@ -301,9 +303,9 @@ function renderKpis(){
     <div class="kpi"><div class="lab">会话总数</div>
       <div class="val">${sessCount.toLocaleString('en-US')}</div>
       <div class="sub">${agents.length} 个 Agent 数据源</div></div>
-    <div class="kpi"><div class="lab">今日用量</div>
-      <div class="val">${fmt(todayTokens)}</div>
-      <div class="sub">今日新增 token</div></div>`;
+    <div class="kpi"><div class="lab">平均日用量（${rangeLabel}）</div>
+      <div class="val">${fmt(avgDaily)}</div>
+      <div class="sub">${fmtRaw(avgDaily)} tokens / 天</div></div>`;
   $('kpis').innerHTML = html;
 }
 
