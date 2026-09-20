@@ -1,21 +1,21 @@
-@echo off
+﻿@echo off
 REM ============================================================
-REM  Agent Token Monitor - Windows 打包脚本
-REM  用法：双击运行，或在命令行执行 build.bat
-REM  产物：dist\AgentTokenMonitor.exe（单文件，双击即用）
+REM  Agent Token Monitor - Windows 鎵撳寘鑴氭湰
+REM  鐢ㄦ硶锛氬弻鍑昏繍琛岋紝鎴栧湪鍛戒护琛屾墽琛?build.bat
+REM  浜х墿锛歞ist\agent-usage.exe锛堝崟鏂囦欢锛屽弻鍑诲嵆鐢級
 REM ============================================================
 cd /d "%~dp0"
 
-echo [1/3] 检查依赖...
+echo [1/3] 妫€鏌ヤ緷璧?..
 python -m pip show pyinstaller >nul 2>&1 || python -m pip install pyinstaller
 
-echo [2/3] 清理旧构建...
+echo [2/3] 娓呯悊鏃ф瀯寤?..
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 
-echo [3/3] 打包（web + 内置插件 一并打入）...
+echo [3/3] 鎵撳寘锛坵eb + 鍐呯疆鎻掍欢 涓€骞舵墦鍏ワ級...
 python -m PyInstaller --noconfirm --clean --onefile --console ^
-  --name AgentTokenMonitor ^
+  --name agent-usage ^
   --add-data "web;web" ^
   --add-data "plugins;plugins_internal" ^
   --exclude-module pandas ^
@@ -23,7 +23,8 @@ python -m PyInstaller --noconfirm --clean --onefile --console ^
   app.py
 
 echo.
-echo 完成！产物：dist\AgentTokenMonitor.exe
-echo 说明：复制 exe 到任意目录双击即可运行；
-echo       如需扩展新 Agent，在 exe 同目录建 plugins\ 文件夹放入插件文件即可。
-pause
+echo 瀹屾垚锛佷骇鐗╋細dist\agent-usage.exe
+echo 璇存槑锛氬鍒?exe 鍒颁换鎰忕洰褰曞弻鍑诲嵆鍙繍琛岋紱
+echo       濡傞渶鎵╁睍鏂?Agent锛屽湪 exe 鍚岀洰褰曞缓 plugins\ 鏂囦欢澶规斁鍏ユ彃浠舵枃浠跺嵆鍙€?pause
+
+
