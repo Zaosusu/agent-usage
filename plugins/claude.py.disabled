@@ -1,0 +1,14 @@
+# -*- coding: utf-8 -*-
+"""插件：Claude CLI（精确计数）。数据源：~/.claude/projects/**/*.jsonl，assistant 消息带 usage。"""
+from engine.common import scan_jsonl_dir, parse_claude_like_file
+
+KEY = 'claude'
+NAME = 'Claude CLI'
+ESTIMATE = False
+WATCH_PATHS = ['%USERPROFILE%\\.claude\\projects']
+
+
+def scan(full, need, mark):
+    root = WATCH_PATHS[0].replace('%USERPROFILE%', __import__('os').path.expanduser('~'))
+    return scan_jsonl_dir(root, '**/*.jsonl',
+                          lambda p: parse_claude_like_file(KEY, p), full, need, mark)

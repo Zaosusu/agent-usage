@@ -1,0 +1,35 @@
+# Byte-compiled / cached
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build
+build/
+dist/
+*.spec
+
+# Runtime data
+data/usage.db
+data/usage.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local test scripts
+_test_*.py
+probe_*.py
+peek_*.py
+extract_*.py
+check_*.py
+sum_*.py
+grep_*.py
+snappy_*.py
+count_*.py
+list_dou*.py
+_shots/

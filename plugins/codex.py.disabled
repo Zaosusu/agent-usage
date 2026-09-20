@@ -1,0 +1,101 @@
+# -*- coding: utf-8 -*-
+"""插件：Codex（精确计数）。
+
+会话总量：~/.codex/state_5.sqlite threads.tokens_used（累计权威值）。
+按天用量：解析 rollout jsonl 里的 token_usage_record（带时间戳），
+          避免把长会话的累计值全压到"最后打开那天"造成虚高。
+"""
+import os
+import json
+from datetime import datetime
+from engine.common import ro_connect
+
+KEY = 'codex'
+NAME = 'Codex'
+ESTIMATE = False
+WATCH_PATHS = ['%USERPROFILE%\\.codex\\state_5.sqlite']
+
+
+def _rollout_daily(path):
+    """解析单个 rollout 文件，返回 {本地日期: tokens}。"""
+    by_day = {}
+    try:
+        fh = open(path, 'r', encoding='utf-8', errors='replace')
+    except OSError:
+        return by_day
+    with fh:
+        for line in fh:
+            if 'token_usage_record' not in line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            ts = obj.get('timestamp')
+            u = (obj.get('payload') or {}).get('usage') or {}
+            tot = u.get('total_tokens')
+            if not ts or not tot:
+                continue
+            try:
+                dt = datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
+                day = dt.astimezone().strftime('%Y-%m-%d')
+            except Exception:
+                continue
+            by_day[day] = by_day.get(day, 0) + int(tot)
+    return by_day
+
+
+def scan(full, need, mark):
+    dbp = os.path.expanduser(WATCH_PATHS[0].replace('%USERPROFILE%', os.path.expanduser('~')))
+    if not os.path.exists(dbp):
+        return {'sessions': [], 'daily': [], 'daily_files': []}
+    con = ro_connect(dbp)
+    if con is None:
+        return {'sessions': [], 'daily': [], 'daily_files': []}
+    try:
+        rows = con.execute(
+            'select id, rollout_path, title, cwd, model, model_provider, '
+            'tokens_used, created_at_ms, updated_at_ms, created_at, updated_at '
+            'from threads'
+        ).fetchall()
+    except Exception:
+        con.close()
+        return {'sessions': [], 'daily': [], 'daily_files': []}
+    con.close()
+
+    sessions = []
+    daily_rows = []
+    daily_files = []
+    for r in rows:
+        (sid, path, title, cwd, model, provider, tokens,
+         cms, ums, cs, us) = r
+        created = cms if cms else (cs * 1000 if cs else None)
+        updated = ums if ums else (us * 1000 if us else None)
+        cwd = (cwd or '').replace('\\\\?\\', '').replace('\\?\\', '')
+        sessions.append({
+            'agent': KEY, 'session_id': sid,
+            'title': (title or '').strip() or '未命名会话',
+            'cwd': cwd, 'model': model or '', 'provider': provider or '',
+            'created_at': created or updated or 0,
+            'last_activity_at': updated or created or 0,
+            'input_tokens': tokens or 0, 'output_tokens': 0,
+            'cache_read_tokens': 0, 'cache_write_tokens': 0,
+            'total_tokens': tokens or 0, 'cost': None, 'est': 0,
+            'source_file': dbp,
+        })
+        # 按天真实聚合：指纹变化才重解析 rollout
+        if path and os.path.exists(path):
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            fp = f'{st.st_mtime_ns}:{st.st_size}'
+            if need(full, path, fp):
+                by_day = _rollout_daily(path)
+                mark(path, fp)
+                daily_files.append(path)
+                for day, tok in by_day.items():
+                    daily_rows.append({
+                        'day': day, 'tokens': tok, 'est': 0, 'source_file': path,
+                    })
+    return {'sessions': sessions, 'daily': daily_rows, 'daily_files': daily_files}
