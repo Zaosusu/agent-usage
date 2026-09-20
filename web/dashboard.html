@@ -139,8 +139,10 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--line);font-si
     <h2>会话明细
       <span class="ctrl toolbar">
         <select id="agentFilter"><option value="">全部 Agent</option></select>
-        <input type="search" id="searchBox" placeholder="搜索标题 / 模型 / 路径" style="width:220px">
-        <button class="btn" id="moreBtn" onclick="toggleMore()">显示全部</button>
+        <input type="date" id="dateStart" style="width:140px">
+        <span style="color:#8A93A2">~</span>
+        <input type="date" id="dateEnd" style="width:140px">
+        <input type="search" id="searchBox" placeholder="搜索标题 / 模型 / 路径" style="width:180px">
       </span>
     </h2>
     <div style="overflow-x:auto">
@@ -160,6 +162,7 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--line);font-si
         <tbody id="sessBody"></tbody>
       </table>
     </div>
+    <div id="pager" style="display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:#5A6472"></div>
   </section>
 
   <div class="note" id="coverage"></div>
@@ -417,8 +420,11 @@ function renderModels(){
   }, true);
 }
 
-/* ---------- sessions table ---------- */
-function renderTable(){
+/* ---------- sessions table with pagination ---------- */
+const PAGE_SIZE = 10;
+let currentPage = 1;
+
+function getFilteredSessions(){
   const agents = data.agents||[];
   const filterSel = $('agentFilter');
   if (filterSel.options.length <= 1){
@@ -430,16 +436,30 @@ function renderTable(){
   }
   const q = ($('searchBox').value||'').trim().toLowerCase();
   const fa = $('agentFilter').value;
+  const ds = $('dateStart').value;
+  const de = $('dateEnd').value;
   let rows = (data.sessions||[]).filter(s => {
     if (fa && s.agent!==fa) return false;
     if (q && !((s.title||'').toLowerCase().includes(q) || (s.model||'').toLowerCase().includes(q) || (s.cwd||'').toLowerCase().includes(q))) return false;
+    if (s.last_activity_at){
+      const d = new Date(s.last_activity_at);
+      const dsDate = ds ? new Date(ds+'T00:00:00') : null;
+      const deDate = de ? new Date(de+'T23:59:59') : null;
+      if (dsDate && d < dsDate) return false;
+      if (deDate && d > deDate) return false;
+    }
     return true;
   }).sort((a,b) => (b.last_activity_at||0) - (a.last_activity_at||0));
-  const limit = showAll ? rows.length : 100;
-  rows = rows.slice(0, limit);
-  $('moreBtn').textContent = showAll ? '收起' : (rows.length>=100 ? '显示全部 ('+ (data.sessions||[]).length +')' : '');
-  $('moreBtn').style.display = rows.length >= 100 || showAll ? '' : 'none';
-  $('sessBody').innerHTML = rows.map(s => `
+  return rows;
+}
+
+function renderTable(){
+  const rows = getFilteredSessions();
+  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  if (currentPage > totalPages) currentPage = totalPages;
+  const start = (currentPage - 1) * PAGE_SIZE;
+  const pageRows = rows.slice(start, start + PAGE_SIZE);
+  $('sessBody').innerHTML = pageRows.map(s => `
     <tr>
       <td><span class="ag"><i style="background:${colorOf(s.agent)}"></i>${s.agent_name}</span></td>
       <td class="title-cell" title="${(s.title||'').replace(/"/g,'&quot;')}">${s.title||'—'}</td>
@@ -452,7 +472,17 @@ function renderTable(){
       <td class="num cost">${s.cost!=null? s.cost.toFixed(2):'—'}</td>
       <td class="est-cell">${s.est?'估算':''}</td>
     </tr>`).join('');
+  // pager
+  const pager = $('pager');
+  pager.innerHTML = `
+    <button class="btn" onclick="gotoPage(1)" ${currentPage<=1?'disabled':''}>首页</button>
+    <button class="btn" onclick="gotoPage(${currentPage-1})" ${currentPage<=1?'disabled':''}>上一页</button>
+    <span>第 ${currentPage} / ${totalPages} 页（共 ${rows.length} 条）</span>
+    <button class="btn" onclick="gotoPage(${currentPage+1})" ${currentPage>=totalPages?'disabled':''}>下一页</button>
+    <button class="btn" onclick="gotoPage(${totalPages})" ${currentPage>=totalPages?'disabled':''}>末页</button>
+  `;
 }
+function gotoPage(p){ currentPage = p; renderTable(); }
 
 /* ---------- coverage note ---------- */
 function renderCoverage(){
@@ -520,10 +550,10 @@ $('auto').onchange = e => {
 // 默认开启自动刷新
 autoTimer = setInterval(refresh, 60000);
 $('rangeSel').onchange = e => { range = e.target.value; renderDaily(); };
-$('agentFilter').onchange = renderTable;
-$('searchBox').oninput = renderTable;
-function toggleMore(){ showAll = !showAll; renderTable(); }
-$('moreBtn').onclick = toggleMore;
+$('agentFilter').onchange = () => { currentPage = 1; renderTable(); };
+$('searchBox').oninput = () => { currentPage = 1; renderTable(); };
+$('dateStart').onchange = () => { currentPage = 1; renderTable(); };
+$('dateEnd').onchange = () => { currentPage = 1; renderTable(); };
 
 /* ---------- boot ---------- */
 (function boot(){
