@@ -113,6 +113,19 @@ class Handler(BaseHTTPRequestHandler):
                 })
             self._send_json({'ok': True, 'plugins': plugs})
             return
+
+        # ===== Agent 友好接口（给 AI 调用，返回精简结构化数据） =====
+        if path == '/api/agent/summary':
+            self._handle_agent_summary()
+            return
+        m = re.match(r'^/api/agent/agents/([A-Za-z0-9_]+)/usage$', path)
+        if m:
+            self._handle_agent_agent_usage(m.group(1))
+            return
+        if path == '/api/agent/config':
+            self._handle_agent_config_get()
+            return
+
         if path == '/api/stream':
             self._sse_loop()
             return
@@ -201,6 +214,67 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
         self._send_json({'ok': ok, 'message': msg}, 200 if ok else 400)
+
+    # ===== Agent 友好接口 handler =====
+
+    def _handle_agent_summary(self):
+        """返回精简的用量摘要，AI 不用解析复杂 JSON。"""
+        data = load_data()
+        if data is None:
+            self._send_json({'ok': False, 'error': '尚未扫描'}, 404)
+            return
+        agents = data.get('agents', [])
+        summary = {
+            'total_tokens': data.get('totals', {}).get('total_tokens', 0),
+            'real_tokens': data.get('totals', {}).get('real_tokens', 0),
+            'est_tokens': data.get('totals', {}).get('est_tokens', 0),
+            'agent_count': len(agents),
+            'agents': [
+                {
+                    'key': a.get('agent'),
+                    'name': a.get('title', a.get('agent')),
+                    'total_tokens': a.get('total_tokens', 0),
+                    'sessions': a.get('session_count', 0),
+                    'estimate': a.get('est', 0),
+                }
+                for a in agents
+            ],
+        }
+        self._send_json({'ok': True, 'summary': summary})
+
+    def _handle_agent_agent_usage(self, key):
+        """返回单个 agent 的详细用量。"""
+        data = load_data()
+        if data is None:
+            self._send_json({'ok': False, 'error': '尚未扫描'}, 404)
+            return
+        agents = data.get('agents', [])
+        found = [a for a in agents if a.get('agent') == key]
+        if not found:
+            self._send_json({'ok': False, 'error': f'agent {key} 未找到'}, 404)
+            return
+        self._send_json({'ok': True, 'agent': found[0]})
+
+    def _handle_agent_config_get(self):
+        """查看本地配置（比如 doubao cookie 是否已配置）。"""
+        import os as _os
+        config_path = _os.path.expanduser("~/.doubao-usage/config.json")
+        if not _os.path.isfile(config_path):
+            self._send_json({'ok': True, 'config_exists': False, 'path': config_path})
+            return
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            # 不返回敏感值，只返回 key 列表
+            keys = list(config.keys())
+            self._send_json({
+                'ok': True,
+                'config_exists': True,
+                'path': config_path,
+                'keys': keys,
+            })
+        except Exception as e:
+            self._send_json({'ok': False, 'error': str(e)}, 500)
 
     def _async_refresh(self):
         try:
