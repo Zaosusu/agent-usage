@@ -5,7 +5,7 @@
 2. Local Storage 订阅百分比（本地）：从 leveldb 读 usedThisPeriod/monthlyLimit
 3. trajectory 文本估算（兜底，按日期分布）：扫 .sessions 目录，按天拆分
 
-校准系数（重要，见下方说明）：TOKENS_PER_PCT = 1_200_000（1% ≈ 120 万 token）。
+校准系数：TOKENS_PER_PCT = 2_300_000（1% ≈ 230 万 token），来自 IndexedDB 硬锚点直接测量。
 
 【为什么是“暂定”而非“精确校准”】
 - 豆包的 timeline API 只返回百分比（quota_source.display_text，如 "0.15%"），
@@ -25,9 +25,11 @@
     | F timeline 逐条匹配 1431/1595(90%) Σtok/Σ% | 56.7 万 |
     | 3 + tool schema 20K | 59.7 万 |
   **下界区间 46.7 ~ 59.7 万，中位 ≈51 万**。全部只统计 agent 模式（.sessions 目录），
-  普通对话 / 图像 / 其他模型 / premium 倍率 / 思维链 token 都不在内 ⇒ **均为下界**。
-- **现取 120 万 ≈ 下界中位 × 2.35**：这是**有意留给未建模用量的余量，不是校准值**。
-  （用户 2026-09-21 拍定：认为 50 万对自身用量偏低。）若日后拿到硬锚点，以锚点为准。
+  普通对话 / 图像 / 其他模型 / premium 倍率 / 思维链 token 都不在内 ⇒ **严重低估**。
+
+- ★ **最终采用 230 万，来自硬锚点（直接测量，非估算）**——见下方 TOKENS_PER_PCT 处注释。
+  锚点测得 1% ≈ 232 万，比重建下界高约 4.5 倍，差额正是陪伴/普通对话等未建模部分。
+  重建法只配做**兜底**（无 IndexedDB 数据时），不再作为取值依据。
 
 - ⚠️ 两次踩坑，改系数前务必先读：
     ① commit 90c788c 把 500_000 拍成 5_000_000（10 倍虚高，diff 一行、无依据）。
@@ -51,9 +53,15 @@ NAME = '豆包工作'
 ESTIMATE = True
 WATCH_PATHS = ['%USERPROFILE%\\AppData\\Local\\DoubaoWork\\User Data\\Default']
 
-# 系数：1% ≈ 120 万 token。7 算法收敛于 113.6~139.0 万（中位 125 万，均为 agent 模式下界），
-# 取整为 120 万。500 万已证伪为 10 倍误改；旧“47.8 万”因漏算工具调用上下文重放已作废。
-TOKENS_PER_PCT = 1_200_000
+# 系数：1% ≈ 230 万 token。**来自 IndexedDB 硬锚点（直接测量）**，非估算：
+#   2026-09-21 实测：conv_mori 65 次真实 API 调用 Σ=999,454 token
+#   （09-20 01:46:22~01:59:23）↔ 同时窗 timeline 3 条 Σ=0.430%，
+#   且 quota_source_code 同为 doubao_personal_vip_quota（同一额度池）
+#   ⇒ 1% = 999,454 / 0.430 = 2,324,312 ≈ 230 万。
+# 该锚点优先级高于一切重建法（重建下界仅 ≈51 万，因只覆盖 agent 模式，
+# 陪伴/普通对话不在 .sessions 目录，故严重低估）。
+# 已证伪：500 万（commit 90c788c 十倍误改）；已作废：47.8 万、113.6 万（重建法两个错误版本）。
+TOKENS_PER_PCT = 2_300_000
 
 _DEFAULT_ROOT = os.path.expanduser(WATCH_PATHS[0].replace('%USERPROFILE%', os.path.expanduser('~')))
 

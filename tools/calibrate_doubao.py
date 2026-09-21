@@ -25,8 +25,10 @@ import sys
 import json
 import time
 import glob
+import urllib.request
 import argparse
 import statistics
+from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -234,7 +236,27 @@ def main():
             _apply(exact, reason=f'硬锚点：7天窗口 {args.anchor:,.0f} token')
         return
 
-    # 3) 多算法夹逼
+    # 3) 硬锚点（最高优先级）：IndexedDB 真实 token ↔ timeline 同窗口百分比
+    anchor = algo_hard_anchor(args.root, cookie)
+    if anchor:
+        coef, desc = anchor
+        print()
+        print('★ 硬锚点（直接测量，优先于一切重建法）：')
+        print(f'   {desc}')
+        print(f'   ⇒ 1% = {coef:,.0f} token（{coef/1e4:.0f} 万）')
+        print(f'   ⇒ 全时段 {api_pct:.2f}% = {api_pct*coef/1e8:.2f} 亿')
+        cur = _current_coef()
+        if cur:
+            print(f'   当前 {cur/1e4:.0f} 万 vs 锚点 {coef/1e4:.0f} 万 '
+                  f'(差 {coef/cur:.2f} 倍)')
+        if args.apply:
+            _apply(int(round(coef / args.round_to) * args.round_to),
+                   reason=f'IndexedDB 硬锚点：{desc}')
+            return
+        print('   （加 --apply 可写入）')
+        print()
+
+    # 4) 多算法夹逼（无锚点时的兜底）
     stats = rebuild_sessions(args.root)
     sys_avg, n_sys = system_prompt_avg(args.root)
     print(f'[本地] system prompt 均值 {sys_avg:,.0f} tok（{n_sys} 份）')
@@ -284,6 +306,129 @@ def main():
         _apply(_r(up), reason=reason)
 
 
+def scan_indexeddb(root):
+    """扫 IndexedDB，返回 [(ts_ms, input_tok, output_tok)]。
+
+    这里存的是**真实逐次 API 调用的 input/output token**（随上下文单调递增），
+    是豆包本地唯一能拿到的真实计费量。时间戳是 ISO 8601 字符串，不是 varint。
+    注：记录可能来自陪伴/角色扮演类会话（如 conv_mori），但只要 quota_source_code
+    与 timeline 相同（doubao_personal_vip_quota），就属同一额度池，可直接做锚点。
+    """
+    recs = []
+    idb = os.path.join(root, 'IndexedDB')
+    if not os.path.isdir(idb):
+        return recs
+    for sub in os.listdir(idb):
+        d = os.path.join(idb, sub)
+        if not os.path.isdir(d):
+            continue
+        for fn in os.listdir(d):
+            if not (fn.endswith('.ldb') or fn.endswith('.log')):
+                continue
+            try:
+                data = open(os.path.join(d, fn), 'rb').read()
+            except Exception:
+                continue
+            idx = 0
+            while True:
+                idx = data.find(b'inputTokens', idx)
+                if idx < 0:
+                    break
+                p = idx + len(b'inputTokens')
+                if p < len(data) and data[p:p + 1] == b'I':
+                    p += 1
+                in_tok, p2 = _varint(data, p)
+                m = re.search(rb'outputTokensI?', data[p2:p2 + 300])
+                out_tok = 0
+                if m:
+                    out_tok, _ = _varint(data, p2 + m.end())
+                recs.append((_iso_near(data, idx), in_tok, out_tok))
+                idx = p2
+    return [r for r in recs if r[0] > 0]
+
+
+def _varint(data, pos):
+    val = 0
+    shift = 0
+    while pos < len(data):
+        b = data[pos]
+        pos += 1
+        val |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            break
+        shift += 7
+    return val, pos
+
+
+def _iso_near(data, idx, span=4000):
+    """在 idx 附近找最近的 ISO 时间串，返回 epoch ms。"""
+    win = data[max(0, idx - span): idx + span].decode('latin1')
+    best = None
+    for m in re.finditer(r'(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})', win):
+        y, mo, d, h, mi, s = (int(x) for x in m.groups())
+        ts = datetime(y, mo, d, h, mi, s, tzinfo=timezone.utc).timestamp() * 1000
+        if best is None or abs(m.start() - span) < best[0]:
+            best = (abs(m.start() - span), ts)
+    return best[1] if best else 0
+
+
+def timeline_with_ts(cookie):
+    """拉 timeline 逐条 [(ts_ms, pct, name, quota_code)]。"""
+    from plugins.doubao import _TIMELINE_URL, _timeline_headers
+    out = []
+    cursor = None
+    try:
+        for _ in range(200):
+            body = json.dumps({"cursor": cursor} if cursor else {}).encode()
+            req = urllib.request.Request(_TIMELINE_URL, data=body,
+                                         headers=_timeline_headers(cookie), method="POST")
+            d = json.loads(urllib.request.urlopen(req, timeout=15).read()).get("data", {})
+            es = d.get("entries", [])
+            if not es:
+                break
+            for e in es:
+                u = e.get("usage", {})
+                ps = u.get("quota_source", {}).get("display_text", "0%")
+                p = 0.005 if "<" in ps else float(ps.replace("%", "") or 0)
+                out.append((u.get("occurred_at_ms", 0), p,
+                            u.get("display_name") or "",
+                            (u.get("quota_source") or {}).get("quota_source_code", "")))
+            cursor = d.get("next_cursor")
+            if not d.get("has_more") or not cursor:
+                break
+    except Exception:
+        return out
+    return [x for x in out if x[0] > 0]
+
+
+def algo_hard_anchor(root, cookie):
+    """算法 G（硬锚点）：真实 token ↔ 同时间窗 timeline 百分比。
+
+    这是唯一能直接测量的算法，优先级高于所有重建法。
+    返回 (系数, 描述) 或 None。
+    """
+    recs = scan_indexeddb(root)
+    if not recs:
+        return None
+    tl = timeline_with_ts(cookie)
+    if not tl:
+        return None
+    ts = sorted(r[0] for r in recs)
+    total = sum(r[1] + r[2] for r in recs)
+    lo, hi = ts[0] - 5 * 60_000, ts[-1] + 5 * 60_000
+    win = [x for x in tl if lo <= x[0] <= hi]
+    win_pct = sum(x[1] for x in win)
+    if win_pct <= 0:
+        return None
+    coef = total / win_pct
+    t0 = datetime.fromtimestamp(ts[0] / 1000)
+    t1 = datetime.fromtimestamp(ts[-1] / 1000)
+    desc = (f'{len(recs)} 次真实调用 Σ={total:,} tok '
+            f'({t0:%m-%d %H:%M}~{t1:%H:%M}) ↔ timeline '
+            f'{len(win)} 条 Σ={win_pct:.3f}% [同额度池]')
+    return coef, desc
+
+
 def _current_coef():
     m = re.search(r'^TOKENS_PER_PCT = ([\d_]+)',
                   open(os.path.join(ROOT, 'plugins', 'doubao.py'), encoding='utf-8').read(),
@@ -302,7 +447,10 @@ def _timeline_entries(cookie):
 def _apply(value, reason):
     path = os.path.join(ROOT, 'plugins', 'doubao.py')
     txt = open(path, encoding='utf-8').read()
-    new = re.sub(r'^TOKENS_PER_PCT = \d+', f'TOKENS_PER_PCT = {int(value)}',
+    # 注意：必须匹配 [\d_]+，正则写 \d+ 只会吃掉 "1_200_000" 里的 "1"，
+    # 替换后变成 "2300000_200_000"（已踩过）。
+    pretty = f'{int(value):_}'
+    new = re.sub(r'^TOKENS_PER_PCT = [\d_]+', f'TOKENS_PER_PCT = {pretty}',
                  txt, count=1, flags=re.M)
     if new == txt:
         print(f'[apply] 未匹配到 TOKENS_PER_PCT 赋值行，请手工改 {path}')
