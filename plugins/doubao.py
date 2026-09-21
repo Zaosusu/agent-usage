@@ -5,7 +5,9 @@
 2. Local Storage 订阅百分比（本地）：从 leveldb 读 usedThisPeriod/monthlyLimit
 3. trajectory 文本估算（兜底，按日期分布）：扫 .sessions 目录，按天拆分
 
-校准系数：1% ≈ 500 万 token（TOKENS_PER_PCT = 5_000_000，通过 timeline + 本地 trajectory 交叉校准）
+校准系数：1% ≈ 50 万 token（TOKENS_PER_PCT = 500_000）。
+依据：timeline 499.2% ↔ 会话轨迹重建 2.385 亿 token（下界）双向反推，两种算法均得 47.8 万/1%，
+计入 agent 模式固定开销（system prompt + 工具定义）后约 50~56 万/1%；并与 ¥68/月包月定价量级吻合。
 """
 import os, re, json, time, urllib.request
 from engine.common import collect_strings, estimate_tokens
@@ -15,7 +17,7 @@ NAME = '豆包工作'
 ESTIMATE = True
 WATCH_PATHS = ['%USERPROFILE%\\AppData\\Local\\DoubaoWork\\User Data\\Default']
 
-TOKENS_PER_PCT = 5_000_000
+TOKENS_PER_PCT = 500_000
 
 _DEFAULT_ROOT = os.path.expanduser(WATCH_PATHS[0].replace('%USERPROFILE%', os.path.expanduser('~')))
 
