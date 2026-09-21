@@ -5,9 +5,23 @@
 2. Local Storage 订阅百分比（本地）：从 leveldb 读 usedThisPeriod/monthlyLimit
 3. trajectory 文本估算（兜底，按日期分布）：扫 .sessions 目录，按天拆分
 
-校准系数：1% ≈ 50 万 token（TOKENS_PER_PCT = 500_000）。
-依据：timeline 499.2% ↔ 会话轨迹重建 2.385 亿 token（下界）双向反推，两种算法均得 47.8 万/1%，
-计入 agent 模式固定开销（system prompt + 工具定义）后约 50~56 万/1%；并与 ¥68/月包月定价量级吻合。
+校准系数（重要，见下方说明）：TOKENS_PER_PCT = 1_500_000（暂定 1% ≈ 150 万 token）。
+
+【为什么是“暂定”而非“精确校准”】
+- 豆包的 timeline API 只返回百分比（quota_source.display_text，如 "0.15%"），
+  配额接口只返回 used_percent（占 7 天额度），**本地与 API 均无任何“绝对 token 数”字段**。
+  因此无法像 WorkBuddy 那样拿到硬锚点做 1:1 反推。
+- 已确认错误：commit 90c788c 把原本正确的 500_000 误改成 5_000_000（diff 仅一行、
+  commit message 无依据），导致豆包用量虚高 10 倍（24.96 亿），已回退。
+- 下界证据：仅 agent 模式（agent_mode/workspace/.sessions）的轨迹重建 = 2.385 亿 token，
+  对应 499.2% ⇒ 1% ≥ 47.8 万。但 agent 模式只是用量的一部分（普通对话/图像/其他模型不在此目录），
+  故真实系数一定 > 50 万。
+- 合理区间：综合“下界 50 万 + 用户实际重度使用（已烧满 5 个 7 天窗口、单日峰值 79%）”，
+  真实系数大概率落在 100 万 ~ 300 万。暂取中值 150 万。
+
+【如何钉死精确值（待办）】
+拿到“一个 7 天窗口 = 多少 token”的绝对数即可：在豆包用量页读取“占 7 天额度”旁的绝对
+已用/总额，或提供订阅计划的单窗口 token 配额，即可把 TOKENS_PER_PCT 改成准确值。
 """
 import os, re, json, time, urllib.request
 from engine.common import collect_strings, estimate_tokens
@@ -17,7 +31,8 @@ NAME = '豆包工作'
 ESTIMATE = True
 WATCH_PATHS = ['%USERPROFILE%\\AppData\\Local\\DoubaoWork\\User Data\\Default']
 
-TOKENS_PER_PCT = 500_000
+# 暂定系数：1% ≈ 150 万 token（区间 50 万~300 万；500 万已被证伪为 10 倍误改）
+TOKENS_PER_PCT = 1_500_000
 
 _DEFAULT_ROOT = os.path.expanduser(WATCH_PATHS[0].replace('%USERPROFILE%', os.path.expanduser('~')))
 
