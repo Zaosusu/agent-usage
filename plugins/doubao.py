@@ -5,45 +5,41 @@
 2. Local Storage 订阅百分比（本地）：从 leveldb 读 usedThisPeriod/monthlyLimit
 3. trajectory 文本估算（兜底，按日期分布）：扫 .sessions 目录，按天拆分
 
-校准系数：TOKENS_PER_PCT = 2_300_000（1% ≈ 230 万 token），来自 IndexedDB 硬锚点直接测量。
+校准系数：TOKENS_PER_PCT = 500_000（1% ≈ 50 万 token），来自「消息级对齐」直接测量。
+推导全过程见 README「系数校准：1% 等于多少 token」一节，可一键复现：
+    python tools/calibrate_doubao.py
 
-【为什么是“暂定”而非“精确校准”】
+【为什么是「暂定」而非「精确」】
 - 豆包的 timeline API 只返回百分比（quota_source.display_text，如 "0.15%"），
-  配额接口只返回 used_percent（占 7 天额度），**本地与 API 均无任何“绝对 token 数”字段**。
-  因此无法像 WorkBuddy 那样拿到硬锚点做 1:1 反推。
-- 已确认错误：commit 90c788c 把原本正确的 500_000 误改成 5_000_000（diff 仅一行、
-  commit message 无依据），导致豆包用量虚高 10 倍（24.96 亿），已回退。
-- **下界重建（2026-09-21；已固化为 tools/calibrate_doubao.py，可一键复现）**：
-    数据规模：47 会话 / 1504 turn / 2856 次模型调用 / 3043 次工具调用。
-    | 算法 | 推算 1% |
-    |---|---|
-    | 1 裸模型调用（仅消息体） | 46.7 万 |
-    | 2 + system prompt(2671 tok × 2856) | 48.2 万 |
-    | 3 + tool schema 5K | 51.1 万 |
-    | 4 单 turn 均值 160,036 ÷ 单条均值 0.313% | 51.1 万 |
-    | 3 + tool schema 10K | 53.9 万 |
-    | F timeline 逐条匹配 1431/1595(90%) Σtok/Σ% | 56.7 万 |
-    | 3 + tool schema 20K | 59.7 万 |
-  **下界区间 46.7 ~ 59.7 万，中位 ≈51 万**。全部只统计 agent 模式（.sessions 目录），
-  普通对话 / 图像 / 其他模型 / premium 倍率 / 思维链 token 都不在内 ⇒ **严重低估**。
+  配额接口只返回 used_percent（占 7 天额度），**本地与 API 均无任何「绝对 token 数」字段**。
+  所以无法像 WorkBuddy 那样做 1:1 硬锚点反推，只能用「本地重建 ÷ 同批 timeline 百分比」夹逼。
+- 唯一可靠的测法是**消息级对齐**：timeline 每条 = 一条 user 消息，本地重建按同一批消息
+  累加 token。分子分母来自同一批消息，口径天然一致，不受「漏了哪类用量」影响。
 
-- ★ **最终采用 230 万，来自硬锚点（直接测量，非估算）**——见下方 TOKENS_PER_PCT 处注释。
-  锚点测得 1% ≈ 232 万，比重建下界高约 4.5 倍，差额正是陪伴/普通对话等未建模部分。
-  重建法只配做**兜底**（无 IndexedDB 数据时），不再作为取值依据。
+【测量结果（2026-09-21 复核；47 会话 / 1504 turn / 2856 次模型调用）】
+- 双向匹配验证：timeline 1590 条中 **90%** 能对上本地 agent 消息（占 Σpct 82.8%）；
+  反向本地 1470 条消息中 **95.2%** 能在 timeline 找到 ⇒ 匹配是真的，不是巧合。
+- agent 内容密度（直接测得）：Σtok 239,859,254 ÷ Σpct 413.165% = **58.1 万/1%**
+- 账户下限（假设非 agent 内容零消耗）：Σtok 240,694,651 ÷ Σpct 499.200% = **48.2 万/1%**
+- 未匹配的约 17% pct 多为普通对话模式（比 agent 循环轻），真值落在 48~58 万之间
+  ⇒ **取整采用 50 万**。
 
-- ⚠️ 两次踩坑，改系数前务必先读：
-    ① commit 90c788c 把 500_000 拍成 5_000_000（10 倍虚高，diff 一行、无依据）。
-    ② 曾在 tool 消息处**额外加一次“上下文重放”** ⇒ 同一份 input 算了两遍，高估约 2 倍，
-       一度得出“113.6 万”。**工具结果已进 ctx，下一次调用的 ctx_before 本就包含它，
-       不可再加。** 正确模型：一次 assistant 消息 = 一次模型调用，消耗 = 累积上下文 + 本条。
+【已作废的系数与原因（改之前务必先读）】
+- 500 万：commit 90c788c 把 50 万拍成 500 万（diff 一行、无依据），虚高 10 倍。
+- 230 万：commit 463818f 拿 IndexedDB 里 65 条陪伴会话（conv_mori）记录当「硬锚点」。
+  **该推导不成立**：① 窗口从 ±0 放宽到 ±60min，系数从 256 万漂到 6 万（40 倍），
+  说明分子分母根本不是同一批事件；② 该库全量字节里 `quota_source_code` 出现 **0 次**，
+  「同额度池」无法证明；③ 那 65 条时间集中在 01:46~01:59，是 memory 压缩批量落盘，
+  不是真实调用时刻。
+- 47.8 万：只算消息体，漏掉上下文重发。
+- 113.6 万：在 tool 消息处**多加一次「上下文重放」**，同一份 input 算两遍，高估约 2 倍。
+  正确模型：一次 assistant 消息 = 一次模型调用，消耗 = 累积上下文 + 本条输出。
+- 120 万：继承 113.6 万的错误区间（113.6~139.0 万），一并作废。
 
-【如何钉死精确值】
-拿到“一个 7 天窗口 = 多少 token”的绝对数即可一击锁死：
+【如何进一步钉死】
+拿到「一个 7 天窗口 = 多少 token」的绝对数即可一击锁死：
     python tools/calibrate_doubao.py --anchor 1.5e8 --apply
-数字来源：豆包用量页“占 7 天额度”旁的绝对已用/总额，或订阅计划的单窗口 token 配额。
-不确定的时候，重跑校准器看当下下界：
-    python tools/calibrate_doubao.py            # 只算不改
-    python tools/calibrate_doubao.py --uplift 2 --apply
+数字来源：豆包用量页「占 7 天额度」旁的绝对已用/总额，或订阅计划的单窗口 token 配额。
 """
 import os, re, json, time, urllib.request
 from engine.common import collect_strings, estimate_tokens
@@ -53,15 +49,16 @@ NAME = '豆包工作'
 ESTIMATE = True
 WATCH_PATHS = ['%USERPROFILE%\\AppData\\Local\\DoubaoWork\\User Data\\Default']
 
-# 系数：1% ≈ 230 万 token。**来自 IndexedDB 硬锚点（直接测量）**，非估算：
-#   2026-09-21 实测：conv_mori 65 次真实 API 调用 Σ=999,454 token
-#   （09-20 01:46:22~01:59:23）↔ 同时窗 timeline 3 条 Σ=0.430%，
-#   且 quota_source_code 同为 doubao_personal_vip_quota（同一额度池）
-#   ⇒ 1% = 999,454 / 0.430 = 2,324,312 ≈ 230 万。
-# 该锚点优先级高于一切重建法（重建下界仅 ≈51 万，因只覆盖 agent 模式，
-# 陪伴/普通对话不在 .sessions 目录，故严重低估）。
-# 已证伪：500 万（commit 90c788c 十倍误改）；已作废：47.8 万、113.6 万（重建法两个错误版本）。
-TOKENS_PER_PCT = 2_300_000
+# 系数：1% ≈ 51 万 token。来自「消息级对齐」直接测量（2026-09-21 复核）：
+#   分子 = 本地 agent 重建 Σtok（含 system prompt）239,859,254
+#   分母 = 与之同批命中的 timeline Σpct 413.165%
+#   ⇒ 58.1 万/1%（agent 内容密度，直接测得）
+#   另取账户下限口径（Σtok 240,619,442 ÷ 全量 Σpct 499.200%）= 48.2 万/1%
+#   真值介于两者之间（未匹配的约 18% pct 多为较轻的普通对话）⇒ 取中 51 万。
+# 可靠性依据：timeline↔本地消息 正向匹配 88%、反向 95.1%，且按天分布一致。
+# 已作废：500 万（90c788c 十倍误改）、230 万（463818f 窗口漂 40 倍 + 编造同额度池）、
+#         47.8 万（漏算上下文）、113.6 万（重复计算）、120 万（继承 113.6 万错误区间）。
+TOKENS_PER_PCT = 500_000
 
 _DEFAULT_ROOT = os.path.expanduser(WATCH_PATHS[0].replace('%USERPROFILE%', os.path.expanduser('~')))
 

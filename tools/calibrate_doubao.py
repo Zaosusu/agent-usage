@@ -3,10 +3,20 @@
 
 背景：豆包 timeline API 只返回「占 7 天额度」的百分比（如 "0.15%"），
 **本地与 API 都没有任何“绝对 token 数”字段**，无法做 1:1 硬锚点反推。
-所以系数只能靠「本地会话轨迹重建」这类间接算法去夹逼。
+所以系数只能靠「本地会话轨迹重建 ÷ 同批 timeline 百分比」来测。
 
-本脚本把 2026-09-21 那次人工推导固化为可重复执行的程序：
-跑 7 个互相独立的算法，输出有效区间与推荐整数系数。
+本脚本的核心是**消息级对齐法**（2026-09-21 复核后确立，取代了此前两个错误方法）：
+
+  1. timeline 的每条记录 = 一条 user 消息（display_name 就是消息原文）
+  2. 本地重建按**同一批消息**累加 token（一次 assistant 消息 = 一次模型调用，
+     消耗 = 累积上下文 + 本条输出）
+  3. 分子分母来自同一批消息 ⇒ 口径天然一致，不受「漏算了哪类用量」影响
+
+  ⇒ agent 内容密度 = Σtok(命中) / Σpct(命中)
+  ⇒ 账户下限     = Σtok(全量) / Σpct(全量)   （假设非 agent 内容零消耗）
+
+  真值介于两者之间。配套做**双向匹配率**验证（正向 timeline→本地、
+  反向本地→timeline），匹配率低就说明对齐是假的。
 
 用法：
     python tools/calibrate_doubao.py                 # 只算，不改代码
@@ -14,10 +24,14 @@
     python tools/calibrate_doubao.py --anchor 1.5e8  # 有硬锚点：一个 7 天窗口的绝对 token 数
     python tools/calibrate_doubao.py --root "D:/xxx/DoubaoWork/User Data/Default"
 
-设计约束：
-- 全部算法只统计 agent 模式（.doubaowork/agent_mode/workspace/.sessions），
-  不含普通对话/图像/其他模型，因此**每一个结果都是下界**。
-- 若拿到「一个 7 天窗口 = 多少 token」的绝对数，用 --anchor 一击钉死，其余算法作废。
+已作废的方法（不要再用）：
+- **IndexedDB 时间窗硬锚点（旧算法 G）**：把 IndexedDB 里的真实 token 与
+  「±5min 时间窗」内的 timeline 百分比相除。**已证伪**：窗口从 ±0 放宽到
+  ±60min，系数从 256 万漂到 6 万（40 倍漂移），说明分子分母不是同一批事件；
+  且该 IndexedDB 库里 `quota_source_code` 出现 0 次，「同额度池」无法证明；
+  那些记录时间集中在 01:46~01:59，是 memory 压缩批量落盘时刻，非真实调用时刻。
+- **tool schema 敏感性扫描**：tool schema 本地不落盘，5K/10K/20K 只是拍脑袋的
+  假设值，会给结论引入假精度。现在改用消息级对齐，不再需要这个假设。
 """
 import os
 import re
@@ -27,8 +41,6 @@ import time
 import glob
 import urllib.request
 import argparse
-import statistics
-from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -74,27 +86,35 @@ def _norm(s):
 
 
 def rebuild_sessions(root, verbose=True):
-    """逐会话重建 agent 循环，返回统计量与逐 turn 明细。
+    """逐会话重建 agent 循环，返回统计量、逐 turn 明细、按消息 key 的 token 汇总。
 
     模型（关键，别再简化）：
       - **一次 assistant 消息 = 一次模型调用**：消耗 = 该次请求的 input + output
-        input = 此刻累积上下文（历史消息已含 tool result）+ system prompt + tool schema
+        input = 此刻累积上下文（历史消息已含 tool result）+ system prompt
         output = 本条 assistant 内容
       - ⚠️ **不要在 tool 消息处再额外加一次“上下文重放”**：工具结果已经进了 ctx，
         下一次 assistant 调用的 input（ctx_before）里本就包含它。额外加一次等于
-        把同一份 input 算两遍，会系统性高估约 2 倍（2026-09-21 踩过两次：
-        第一次“漏算”→改出 113.6 万；第二次“重复算”→同样偏高）。
-      - 因此本函数只产出一个模型调用成本 `call_cost`，system / tool schema 由
-        run_algorithms 作为独立分量叠加并做敏感性扫描。
+        把同一份 input 算两遍，会系统性高估约 2 倍（2026-09-21 踩过：
+        改出 113.6 万 → 又派生出错误的 120 万）。
+      - system prompt 由调用方作为独立分量叠加（每次调用都要重发）。
+
+    返回的 `by_key` 是消息级对齐法的分子：
+      key = 归一化后的 user 消息前 40 字符（与 timeline display_name 对齐），
+      value = 该消息引发的全部模型调用消耗 + system prompt。
     """
     sdir = sessions_dir(root)
     files = glob.glob(os.path.join(sdir, '**', 'trajectory.jsonl'), recursive=True)
     if not files:
         raise SystemExit('[!] 未找到 trajectory.jsonl，请检查 --root：' + sdir)
 
+    sys_avg, n_sys = system_prompt_avg(root)
+
     stats = dict(sessions=0, turns=0, assistant=0, model_calls=0, tool_calls=0)
     call_cost = 0          # 模型调用成本：Σ(input=累积上下文 + output=本条)
+    call_cost_sys = 0      # 同上，另加 system prompt
     turn_items = []        # (day, user_text, turn_token)
+    by_key = {}            # 消息 key -> token（含 system prompt）
+    by_key_ns = {}         # 消息 key -> token（不含）
 
     for fp in files:
         try:
@@ -106,6 +126,9 @@ def rebuild_sessions(root, verbose=True):
         cur_day = time.strftime('%Y-%m-%d', time.localtime(os.path.getmtime(fp)))
         cur_text = ''
         cur_tok = 0
+        cur_key = None
+        cur_key_tok = 0.0
+        cur_key_tok_ns = 0.0
         for ln in lines:
             ln = ln.strip()
             if not ln:
@@ -119,14 +142,23 @@ def rebuild_sessions(root, verbose=True):
             if role == 'user':
                 if cur_text:
                     turn_items.append((cur_day, cur_text, cur_tok))
+                if cur_key:
+                    by_key[cur_key] = by_key.get(cur_key, 0.0) + cur_key_tok
+                    by_key_ns[cur_key] = by_key_ns.get(cur_key, 0.0) + cur_key_tok_ns
                 cur_text = _user_text(o)
+                cur_key = _norm(cur_text)[:40] or None
                 cur_tok = 0
+                cur_key_tok = 0.0
+                cur_key_tok_ns = 0.0
                 stats['turns'] += 1
             elif role == 'assistant':
                 stats['assistant'] += 1
                 stats['model_calls'] += 1
                 call_cost += ctx + t
+                call_cost_sys += ctx + t + sys_avg
                 cur_tok += ctx + t
+                cur_key_tok += ctx + t + sys_avg
+                cur_key_tok_ns += ctx + t
                 ctx += t
             elif role == 'tool':
                 # 只进上下文，不另计消耗（它的成本体现在下一次调用的 input 里）
@@ -136,13 +168,22 @@ def rebuild_sessions(root, verbose=True):
                 ctx += t
         if cur_text:
             turn_items.append((cur_day, cur_text, cur_tok))
+        if cur_key:
+            by_key[cur_key] = by_key.get(cur_key, 0.0) + cur_key_tok
+            by_key_ns[cur_key] = by_key_ns.get(cur_key, 0.0) + cur_key_tok_ns
 
     stats['call_cost'] = call_cost
+    stats['call_cost_sys'] = call_cost_sys
     stats['turn_items'] = turn_items
+    stats['by_key'] = by_key
+    stats['by_key_ns'] = by_key_ns
+    stats['sys_avg'] = sys_avg
+    stats['n_sys'] = n_sys
     if verbose:
         print(f'[本地] 会话 {stats["sessions"]} / turn {stats["turns"]} / '
               f'assistant {stats["assistant"]} / 工具调用 {stats["tool_calls"]} / '
               f'模型调用 {stats["model_calls"]}')
+        print(f'[本地] system prompt 均值 {sys_avg:,.0f} tok（{n_sys} 份）')
     return stats
 
 
@@ -156,65 +197,70 @@ def system_prompt_avg(root):
     return sum(vals) / len(vals), len(vals)
 
 
-# ---------------------------------------------------------------- 算法
+# ---------------------------------------------------------------- 核心算法
 
-def run_algorithms(stats, sys_avg, api_pct, api_count, timeline_entries):
-    """返回 [(算法名, 1%对应token, 说明)]，全部为 agent 模式下界。"""
-    turns = max(stats['turns'], 1)
-    calls = max(stats['model_calls'], 1)
-    out = []
+def message_alignment(stats, timeline_entries):
+    """消息级对齐法（现行主算法）。
 
-    base = stats['call_cost']
-    out.append(('1 裸模型调用（仅消息体）', base / api_pct, base))
+    timeline 每条 = 一条 user 消息（display_name 就是消息原文）。
+    把本地重建的 token 按同一批消息 key 汇总，再除以这批消息的 Σpct。
 
-    C = base + sys_avg * calls
-    out.append((f'2  +system prompt({sys_avg:,.0f}tok×{calls})', C / api_pct, C))
+    返回 dict：
+      hit_forward   : timeline 条目能在本地找到的比例（按条数 / 按 pct）
+      hit_backward  : 本地消息能在 timeline 找到的比例
+      by_key        : 命中的 key 数
+      density       : 命中批的 Σtok/Σpct（agent 内容密度，万/1%）
+      floor         : 全量 Σtok/全量 Σpct（账户下限，万/1%）
+    """
+    tl_pct = {}          # key -> pct
+    for ts_ms, pct, name, code in timeline_entries:
+        k = _norm(name)[:40]
+        if k:
+            tl_pct[k] = tl_pct.get(k, 0.0) + pct
+    tl_total = sum(x[1] for x in timeline_entries)
 
-    for k in (5_000, 10_000, 20_000):
-        D = C + k * calls
-        out.append((f'3  +tool schema {k//1000}K', D / api_pct, D))
+    by_key = stats.get('by_key', {})
+    by_key_ns = stats.get('by_key_ns', {})
 
-    E = (C / turns) / (api_pct / max(api_count, 1))
-    out.append((f'4  单turn均值 {C/turns:,.0f} ÷ 单条均值 {api_pct/max(api_count,1):.3f}%',
-                E, C))
+    hit = set(by_key) & set(tl_pct)
+    hit_tok = sum(by_key[k] for k in hit)
+    hit_tok_ns = sum(by_key_ns[k] for k in hit)
+    hit_pct = sum(tl_pct[k] for k in hit)
 
-    # F：timeline 逐条 ↔ turn 重建匹配（聚合口径 Σtok/Σ%，分布右偏不能看中位数）
-    if timeline_entries:
-        idx = {}
-        for day, txt, tok in stats['turn_items']:
-            idx.setdefault(_norm(txt)[:40], []).append(tok)
-        sum_tok = 0.0
-        sum_pct = 0.0
-        hit = 0
-        for title, pct in timeline_entries:
-            key = _norm(title)[:40]
-            if key and key in idx:
-                sum_tok += max(idx[key])
-                sum_pct += pct
-                hit += 1
-        if sum_pct > 0 and hit >= max(10, len(timeline_entries) * 0.1):
-            out.append((f'F  逐条匹配 {hit}/{len(timeline_entries)}'
-                        f'({hit/len(timeline_entries)*100:.0f}%) Σtok/Σ%',
-                        sum_tok / sum_pct, sum_tok))
-    return out
+    # 正向：timeline 条目里有多少能对上本地
+    fwd_n = sum(1 for ts_ms, pct, name, code in timeline_entries
+                if _norm(name)[:40] in by_key)
+    fwd_pct = sum(pct for ts_ms, pct, name, code in timeline_entries
+                  if _norm(name)[:40] in by_key)
+    # 反向：本地消息里有多少能对上 timeline
+    bwd_n = sum(1 for k in by_key if k in tl_pct)
+
+    return dict(
+        by_key=len(hit),
+        hit_tok=hit_tok, hit_tok_ns=hit_tok_ns, hit_pct=hit_pct,
+        tl_total=tl_total,
+        fwd_n=fwd_n, fwd_total=len(timeline_entries), fwd_pct=fwd_pct,
+        bwd_n=bwd_n, bwd_total=len(by_key),
+        density=hit_tok / hit_pct if hit_pct else 0,
+        density_ns=hit_tok_ns / hit_pct if hit_pct else 0,
+        floor=stats['call_cost_sys'] / tl_total if tl_total else 0,
+        floor_ns=stats['call_cost'] / tl_total if tl_total else 0,
+    )
 
 
 # ---------------------------------------------------------------- main
 
 def main():
-    ap = argparse.ArgumentParser(description='豆包 token 系数校准器')
+    ap = argparse.ArgumentParser(description='豆包 token 系数校准器（消息级对齐法）')
     ap.add_argument('--root', default=default_root(), help='豆包工作 Default 目录')
     ap.add_argument('--apply', action='store_true', help='把结果写回 plugins/doubao.py')
     ap.add_argument('--anchor', type=float, default=0,
                     help='硬锚点：一个 7 天窗口(100%%)的绝对 token 数，如 1.5e8')
     ap.add_argument('--round-to', type=int, default=100_000, help='取整粒度，默认 10 万')
-    ap.add_argument('--uplift', type=float, default=1.0,
-                    help='未建模用量放大系数。重建只覆盖 agent 模式，'
-                         '普通对话/图像/premium 倍率/思维链不在内，默认 1.0=纯下界')
     args = ap.parse_args()
 
     print('=' * 72)
-    print('豆包 token 系数校准器')
+    print('豆包 token 系数校准器（消息级对齐法）')
     print('=' * 72)
 
     # 1) timeline 百分比（唯一权威分母）
@@ -226,7 +272,7 @@ def main():
     print(f'[API] timeline 总百分比 = {api_pct:.2f}%  ({api_count} 条, {len(api_daily)} 天)')
     print(f'[本地] root = {args.root}')
 
-    # 2) 硬锚点优先
+    # 2) 真硬锚点优先（用户能提供绝对配额时）
     if args.anchor > 0:
         exact = args.anchor / 100.0
         print()
@@ -236,144 +282,68 @@ def main():
             _apply(exact, reason=f'硬锚点：7天窗口 {args.anchor:,.0f} token')
         return
 
-    # 3) 硬锚点（最高优先级）：IndexedDB 真实 token ↔ timeline 同窗口百分比
-    anchor = algo_hard_anchor(args.root, cookie)
-    if anchor:
-        coef, desc = anchor
-        print()
-        print('★ 硬锚点（直接测量，优先于一切重建法）：')
-        print(f'   {desc}')
-        print(f'   ⇒ 1% = {coef:,.0f} token（{coef/1e4:.0f} 万）')
-        print(f'   ⇒ 全时段 {api_pct:.2f}% = {api_pct*coef/1e8:.2f} 亿')
-        cur = _current_coef()
-        if cur:
-            print(f'   当前 {cur/1e4:.0f} 万 vs 锚点 {coef/1e4:.0f} 万 '
-                  f'(差 {coef/cur:.2f} 倍)')
-        if args.apply:
-            _apply(int(round(coef / args.round_to) * args.round_to),
-                   reason=f'IndexedDB 硬锚点：{desc}')
-            return
-        print('   （加 --apply 可写入）')
-        print()
-
-    # 4) 多算法夹逼（无锚点时的兜底）
+    # 3) 本地重建
     stats = rebuild_sessions(args.root)
-    sys_avg, n_sys = system_prompt_avg(args.root)
-    print(f'[本地] system prompt 均值 {sys_avg:,.0f} tok（{n_sys} 份）')
-    print()
 
-    # timeline 逐条（用于算法 F）
+    # 4) 消息级对齐
     entries = _timeline_entries(cookie)
-    algos = run_algorithms(stats, sys_avg, api_pct, api_count, entries)
+    if not entries:
+        raise SystemExit('[!] 拿不到 timeline 逐条明细，无法做消息级对齐')
 
-    print('%-46s %14s %14s' % ('算法', '总量(token)', '推算 1%'))
-    print('-' * 78)
-    valid = []
-    for name, per_pct, total in algos:
-        mark = 'x' if '已作废' in name else ' '
-        print('%-46s %14s %14s' % (name, f'{total/1e8:.2f}亿', f'{per_pct/1e4:.1f}万'))
-        if mark == ' ':
-            valid.append((name, per_pct))
-    print('-' * 78)
-
-    vals = sorted(v for _, v in valid)
-    lo, hi = vals[0], vals[-1]
-    med = statistics.median(vals)
-    up = med * args.uplift
-
-    def _r(x):
-        return int(round(x / args.round_to) * args.round_to)
+    m = message_alignment(stats, entries)
 
     print()
-    print(f'下界区间 : {lo/1e4:.1f} ~ {hi/1e4:.1f} 万/1%   中位 {med/1e4:.1f} 万  (uplift={args.uplift})')
-    print(f'推荐整数 : {_r(up)/1e4:.0f} 万/1%  (取整粒度 {args.round_to//10000} 万)')
+    print('-' * 72)
+    print('① 双向匹配验证（匹配率低 ⇒ 对齐是假的，结论作废）')
+    print(f'   正向 timeline→本地 : {m["fwd_n"]}/{m["fwd_total"]} 条 '
+          f'({m["fwd_n"]/max(m["fwd_total"],1)*100:.1f}%)，'
+          f'占 Σpct {m["fwd_pct"]/m["tl_total"]*100:.1f}%')
+    print(f'   反向 本地→timeline : {m["bwd_n"]}/{m["bwd_total"]} 条 '
+          f'({m["bwd_n"]/max(m["bwd_total"],1)*100:.1f}%)')
+    print(f'   命中 key 数         : {m["by_key"]}')
+
     print()
-    print('⚠ 以上**全部是下界**：重建只覆盖 agent 模式（47 个会话目录），')
-    print('  普通对话 / 图像 / 其他模型 / premium 倍率 / 思维链 token 都不在内。')
-    print('  真实系数 ≥ 推荐值。想留未建模余量用 --uplift 1.5~2.0。')
-    print('  要钉死：--anchor <一个7天窗口的绝对token数>。')
+    print('② 两个口径（真值介于两者之间）')
+    print(f'   agent 内容密度 = Σtok(命中) / Σpct(命中)')
+    print(f'      含 system prompt : {m["hit_tok"]:,.0f} / {m["hit_pct"]:.3f}% '
+          f'= {m["density"]/1e4:.1f} 万/1%')
+    print(f'      不含             : {m["hit_tok_ns"]:,.0f} / {m["hit_pct"]:.3f}% '
+          f'= {m["density_ns"]/1e4:.1f} 万/1%')
+    print(f'   账户下限 = Σtok(全量) / Σpct(全量)（假设非 agent 内容零消耗）')
+    print(f'      含 system prompt : {stats["call_cost_sys"]:,.0f} / {m["tl_total"]:.3f}% '
+          f'= {m["floor"]/1e4:.1f} 万/1%')
+    print(f'      不含             : {stats["call_cost"]:,.0f} / {m["tl_total"]:.3f}% '
+          f'= {m["floor_ns"]/1e4:.1f} 万/1%')
+
+    lo = min(m['density'], m['floor'])
+    hi = max(m['density'], m['floor'])
+    med = (lo + hi) / 2
+    rec = int(round(med / args.round_to) * args.round_to)
+
+    print()
+    print(f'   区间 : {lo/1e4:.1f} ~ {hi/1e4:.1f} 万/1%')
+    print(f'   推荐 : {rec/1e4:.0f} 万/1%（取中，取整粒度 {args.round_to//10000} 万）')
+    print(f'   ⇒ 全时段 {m["tl_total"]:.1f}% = {m["tl_total"]*rec/1e8:.2f} 亿 token')
 
     cur = _current_coef()
     if cur:
         print()
-        print(f'当前代码 TOKENS_PER_PCT = {cur:,}（{cur/1e4:.0f} 万/1%），'
-              f'= 本次下界中位 × {cur/med:.2f}')
-        print(f'  换算：timeline {api_pct:.2f}% → {api_pct*cur/1e8:.2f} 亿')
+        print(f'当前代码 TOKENS_PER_PCT = {cur:,}（{cur/1e4:.0f} 万/1%）')
+        print(f'   换算：timeline {api_pct:.2f}% → {api_pct*cur/1e8:.2f} 亿')
+        if abs(cur - rec) > args.round_to:
+            print(f'   ⚠ 与推荐值差 {cur/rec:.2f} 倍，建议 --apply')
 
     if args.apply:
-        reason = (f'{len(valid)} 算法下界区间 {lo/1e4:.1f}~{hi/1e4:.1f} 万，'
-                  f'中位 {med/1e4:.1f} 万 × uplift {args.uplift}（agent 模式重建）')
-        _apply(_r(up), reason=reason)
-
-
-def scan_indexeddb(root):
-    """扫 IndexedDB，返回 [(ts_ms, input_tok, output_tok)]。
-
-    这里存的是**真实逐次 API 调用的 input/output token**（随上下文单调递增），
-    是豆包本地唯一能拿到的真实计费量。时间戳是 ISO 8601 字符串，不是 varint。
-    注：记录可能来自陪伴/角色扮演类会话（如 conv_mori），但只要 quota_source_code
-    与 timeline 相同（doubao_personal_vip_quota），就属同一额度池，可直接做锚点。
-    """
-    recs = []
-    idb = os.path.join(root, 'IndexedDB')
-    if not os.path.isdir(idb):
-        return recs
-    for sub in os.listdir(idb):
-        d = os.path.join(idb, sub)
-        if not os.path.isdir(d):
-            continue
-        for fn in os.listdir(d):
-            if not (fn.endswith('.ldb') or fn.endswith('.log')):
-                continue
-            try:
-                data = open(os.path.join(d, fn), 'rb').read()
-            except Exception:
-                continue
-            idx = 0
-            while True:
-                idx = data.find(b'inputTokens', idx)
-                if idx < 0:
-                    break
-                p = idx + len(b'inputTokens')
-                if p < len(data) and data[p:p + 1] == b'I':
-                    p += 1
-                in_tok, p2 = _varint(data, p)
-                m = re.search(rb'outputTokensI?', data[p2:p2 + 300])
-                out_tok = 0
-                if m:
-                    out_tok, _ = _varint(data, p2 + m.end())
-                recs.append((_iso_near(data, idx), in_tok, out_tok))
-                idx = p2
-    return [r for r in recs if r[0] > 0]
-
-
-def _varint(data, pos):
-    val = 0
-    shift = 0
-    while pos < len(data):
-        b = data[pos]
-        pos += 1
-        val |= (b & 0x7F) << shift
-        if not (b & 0x80):
-            break
-        shift += 7
-    return val, pos
-
-
-def _iso_near(data, idx, span=4000):
-    """在 idx 附近找最近的 ISO 时间串，返回 epoch ms。"""
-    win = data[max(0, idx - span): idx + span].decode('latin1')
-    best = None
-    for m in re.finditer(r'(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})', win):
-        y, mo, d, h, mi, s = (int(x) for x in m.groups())
-        ts = datetime(y, mo, d, h, mi, s, tzinfo=timezone.utc).timestamp() * 1000
-        if best is None or abs(m.start() - span) < best[0]:
-            best = (abs(m.start() - span), ts)
-    return best[1] if best else 0
+        reason = (f'消息级对齐：命中 Σtok {m["hit_tok"]:,.0f} ÷ Σpct {m["hit_pct"]:.3f}% '
+                  f'= {m["density"]/1e4:.1f} 万；账户下限 {m["floor"]/1e4:.1f} 万；取中')
+        _apply(rec, reason=reason)
 
 
 def timeline_with_ts(cookie):
-    """拉 timeline 逐条 [(ts_ms, pct, name, quota_code)]。"""
+    """拉 timeline 逐条 [(ts_ms, pct, name, quota_code)]。
+
+    display_name 就是用户消息原文，这是消息级对齐的锚。
+    """
     from plugins.doubao import _TIMELINE_URL, _timeline_headers
     out = []
     cursor = None
@@ -401,34 +371,6 @@ def timeline_with_ts(cookie):
     return [x for x in out if x[0] > 0]
 
 
-def algo_hard_anchor(root, cookie):
-    """算法 G（硬锚点）：真实 token ↔ 同时间窗 timeline 百分比。
-
-    这是唯一能直接测量的算法，优先级高于所有重建法。
-    返回 (系数, 描述) 或 None。
-    """
-    recs = scan_indexeddb(root)
-    if not recs:
-        return None
-    tl = timeline_with_ts(cookie)
-    if not tl:
-        return None
-    ts = sorted(r[0] for r in recs)
-    total = sum(r[1] + r[2] for r in recs)
-    lo, hi = ts[0] - 5 * 60_000, ts[-1] + 5 * 60_000
-    win = [x for x in tl if lo <= x[0] <= hi]
-    win_pct = sum(x[1] for x in win)
-    if win_pct <= 0:
-        return None
-    coef = total / win_pct
-    t0 = datetime.fromtimestamp(ts[0] / 1000)
-    t1 = datetime.fromtimestamp(ts[-1] / 1000)
-    desc = (f'{len(recs)} 次真实调用 Σ={total:,} tok '
-            f'({t0:%m-%d %H:%M}~{t1:%H:%M}) ↔ timeline '
-            f'{len(win)} 条 Σ={win_pct:.3f}% [同额度池]')
-    return coef, desc
-
-
 def _current_coef():
     m = re.search(r'^TOKENS_PER_PCT = ([\d_]+)',
                   open(os.path.join(ROOT, 'plugins', 'doubao.py'), encoding='utf-8').read(),
@@ -437,18 +379,17 @@ def _current_coef():
 
 
 def _timeline_entries(cookie):
-    """拉 timeline 逐条 (title, pct)，供算法 F 匹配。失败返回 []。"""
+    """拉 timeline 逐条 [(ts_ms, pct, name, quota_code)]，供消息级对齐。失败返回 []。"""
     if not cookie:
         return []
-    from plugins.doubao import _fetch_timeline_entries
-    return _fetch_timeline_entries(cookie)
+    return timeline_with_ts(cookie)
 
 
 def _apply(value, reason):
     path = os.path.join(ROOT, 'plugins', 'doubao.py')
     txt = open(path, encoding='utf-8').read()
     # 注意：必须匹配 [\d_]+，正则写 \d+ 只会吃掉 "1_200_000" 里的 "1"，
-    # 替换后变成 "2300000_200_000"（已踩过）。
+    # 替换后会变成 "5100000_200_000" 这种垃圾（已踩过）。
     pretty = f'{int(value):_}'
     new = re.sub(r'^TOKENS_PER_PCT = [\d_]+', f'TOKENS_PER_PCT = {pretty}',
                  txt, count=1, flags=re.M)
