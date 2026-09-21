@@ -115,6 +115,7 @@ def rebuild_sessions(root, verbose=True):
     turn_items = []        # (day, user_text, turn_token)
     by_key = {}            # 消息 key -> token（含 system prompt）
     by_key_ns = {}         # 消息 key -> token（不含）
+    ctx_list = []          # 每次调用时的上下文长度（用于物理合理性检验）
 
     for fp in files:
         try:
@@ -159,6 +160,7 @@ def rebuild_sessions(root, verbose=True):
                 cur_tok += ctx + t
                 cur_key_tok += ctx + t + sys_avg
                 cur_key_tok_ns += ctx + t
+                ctx_list.append(ctx)
                 ctx += t
             elif role == 'tool':
                 # 只进上下文，不另计消耗（它的成本体现在下一次调用的 input 里）
@@ -177,6 +179,7 @@ def rebuild_sessions(root, verbose=True):
     stats['turn_items'] = turn_items
     stats['by_key'] = by_key
     stats['by_key_ns'] = by_key_ns
+    stats['ctx_list'] = ctx_list
     stats['sys_avg'] = sys_avg
     stats['n_sys'] = n_sys
     if verbose:
@@ -324,6 +327,40 @@ def main():
     print(f'   区间 : {lo/1e4:.1f} ~ {hi/1e4:.1f} 万/1%')
     print(f'   推荐 : {rec/1e4:.0f} 万/1%（取中，取整粒度 {args.round_to//10000} 万）')
     print(f'   ⇒ 全时段 {m["tl_total"]:.1f}% = {m["tl_total"]*rec/1e8:.2f} 亿 token')
+
+    # ③ 物理合理性检验：单次 API 调用不可能超过模型上下文窗口
+    print()
+    print('-' * 72)
+    print('③ 物理合理性检验（独立于匹配率，只看上下文窗口约束）')
+    ctxs = sorted(stats.get('ctx_list') or [])
+    if ctxs:
+        n = len(ctxs)
+        avg_ctx = sum(ctxs) / n
+        print(f'   实测 agent 模式单次「调用时上下文」：'
+              f'中位 {ctxs[n//2]:,} / p90 {ctxs[9*n//10]:,} / max {ctxs[-1]:,} / 均值 {avg_ctx:,.0f} tok')
+        print(f'   这是下限（未含 system prompt / tool schema / 非 agent 用量）')
+        print()
+        print(f'   {"系数":<10}{"全时段总量":>12}{"÷调用次数":>12}{"vs 实测均值":>12}  合理性')
+        print('   ' + '-' * 62)
+        for nm, c in [('47.8 万', 47.8e4), ('50 万', 50e4), ('58 万', 58e4),
+                      ('120 万', 120e4), ('150 万', 150e4), ('230 万', 230e4)]:
+            tot = m['tl_total'] * c
+            per = tot / n
+            ratio = per / avg_ctx
+            if per < 128_000:
+                note = '✅ 在 128K 窗口内'
+            elif per < 200_000:
+                note = '⚠ 超 128K 窗口'
+            else:
+                note = '❌ 远超窗口，不可能'
+            mark = '  ← 现行' if abs(c - rec) < 1 else ''
+            print(f'   {nm:<10}{tot/1e8:>10.2f} 亿{per:>12,.0f}{ratio:>11.2f}x  {note}{mark}')
+        print()
+        print(f'   读法：50 万 ⇒ 账户均值 {m["tl_total"]*rec/n:,.0f} tok ≈ 实测 agent 均值 × '
+              f'{m["tl_total"]*rec/n/avg_ctx:.2f}（未建模部分占 {m["tl_total"]*rec/n/avg_ctx-1:.0%}，合理）；')
+        print(f'         230 万 ⇒ 账户均值 {m["tl_total"]*230e4/n:,.0f} tok，'
+              f'要求单次调用平均 {m["tl_total"]*230e4/n/avg_ctx:.1f} 倍于 agent 实测值，')
+        print(f'         且绝对数远超任何模型的上下文窗口 —— 物理上不成立。')
 
     cur = _current_coef()
     if cur:
