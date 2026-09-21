@@ -15,7 +15,7 @@ NAME = '豆包工作'
 ESTIMATE = True
 WATCH_PATHS = ['%USERPROFILE%\\AppData\\Local\\DoubaoWork\\User Data\\Default']
 
-TOKENS_PER_PCT = 500_000
+TOKENS_PER_PCT = 5_000_000
 
 _DEFAULT_ROOT = os.path.expanduser(WATCH_PATHS[0].replace('%USERPROFILE%', os.path.expanduser('~')))
 
