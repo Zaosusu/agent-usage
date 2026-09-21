@@ -21,8 +21,9 @@ _DEFAULT_ROOT = os.path.expanduser(WATCH_PATHS[0].replace('%USERPROFILE%', os.pa
 
 
 def _fetch_timeline(cookie_str):
+    """拉 timeline API，返回 (总百分比, 记录数, {日期: 当日百分比})"""
     if not cookie_str:
-        return None, None
+        return None, None, {}
     qs = ("version_code=20800&language=zh&device_platform=web"
           "&aid=497858&real_aid=497858&pkg_type=release_version"
           "&device_id=7667391337516697151&pc_version=3.37.5"
@@ -39,13 +40,14 @@ def _fetch_timeline(cookie_str):
     }
     all_pct = 0.0
     count = 0
+    daily = {}
     cursor = None
     try:
-        for _ in range(100):
+        for _ in range(200):
             body = json.dumps({"cursor": cursor} if cursor else {}).encode()
             url = f"https://www.doubao.com/alice/commerce/usage/timeline/?{qs}"
             req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-            r = json.loads(urllib.request.urlopen(req, timeout=10).read())
+            r = json.loads(urllib.request.urlopen(req, timeout=15).read())
             d = r.get("data", {})
             entries = d.get("entries", [])
             if not entries:
@@ -54,19 +56,25 @@ def _fetch_timeline(cookie_str):
                 u = e.get("usage", {})
                 pct_str = u.get("quota_source", {}).get("display_text", "0%")
                 if "<" in pct_str:
-                    all_pct += 0.005
+                    pct = 0.005
                 else:
                     try:
-                        all_pct += float(pct_str.replace("%", ""))
+                        pct = float(pct_str.replace("%", ""))
                     except ValueError:
-                        pass
+                        pct = 0
+                all_pct += pct
                 count += 1
+                # 提取日期
+                ts = u.get("occurred_at_ms", 0) / 1000 if u.get("occurred_at_ms") else 0
+                if ts > 0:
+                    day = time.strftime('%Y-%m-%d', time.localtime(ts))
+                    daily[day] = daily.get(day, 0) + pct
             cursor = d.get("next_cursor")
             if not d.get("has_more") or not cursor:
                 break
     except Exception:
-        return None, None
-    return all_pct, count
+        return None, None, {}
+    return all_pct, count, daily
 
 
 def _extract_cookie():
@@ -183,26 +191,61 @@ def _scan_trajectory_daily():
 
 def scan(full, need, mark):
     cookie = _extract_cookie()
-    api_pct, api_count = _fetch_timeline(cookie)
+    api_pct, api_count, api_daily = _fetch_timeline(cookie)
     quota = _scan_quota()
     idx_in, idx_out = _scan_indexeddb()
     daily_traj = _scan_trajectory_daily()
 
-    if api_pct is not None and api_pct > 0:
+    if api_pct and api_pct > 0 and api_daily:
         total_est = int(api_pct * TOKENS_PER_PCT)
-        source = 'timeline-api'
+        source = f'timeline-api ({api_count}条, {api_pct:.1f}%)'
+        # 用 API 返回的按日期分组的用量
+        daily_pct = api_daily
     elif quota:
         pct, used, limit = quota
         total_est = int(pct * 100 * TOKENS_PER_PCT)
         source = 'local-quota'
+        daily_pct = None
     else:
         total_est = sum(daily_traj.values())
         source = 'trajectory-estimate'
+        daily_pct = None
 
     if total_est == 0 and idx_in + idx_out == 0:
         return []
 
-    # 按 trajectory 日期分布拆分到每天
+    # 优先用 API 的按日期数据
+    if daily_pct and total_est > 0:
+        sessions = []
+        today_str = time.strftime('%Y-%m-%d')
+        for day, pct in sorted(daily_pct.items()):
+            if day > today_str:
+                continue
+            day_tokens = int(pct * TOKENS_PER_PCT)
+            if day_tokens < 1000:
+                continue
+            ts_ms = int(time.mktime(time.strptime(day, '%Y-%m-%d')) * 1000)
+            sessions.append({
+                'agent': KEY,
+                'session_id': f'doubao-{day}',
+                'title': f'豆包工作 {day}',
+                'cwd': '',
+                'model': 'doubao-seed',
+                'provider': 'bytedance',
+                'created_at': ts_ms,
+                'last_activity_at': ts_ms,
+                'input_tokens': 0,
+                'output_tokens': 0,
+                'cache_read_tokens': 0,
+                'cache_write_tokens': 0,
+                'total_tokens': day_tokens,
+                'cost': None,
+                'est': 1,
+                'source_file': source,
+            })
+        return sessions
+
+    # 兜底：按 trajectory 日期分布拆分
     if daily_traj and total_est > 0:
         traj_total = sum(daily_traj.values())
         if traj_total > 0:
