@@ -7,7 +7,8 @@
 ## 功能
 
 - 总用量 KPI、每日趋势堆叠柱（含区间平均日用量）、各 Agent 对比、模型 TOP15、会话明细
-- 区间平均日用量：选近14天/30天/90天/全部，自动算对应区间日均
+- 区间平均日用量：今天 / 近 3 天 / 7 天 / 14 天 / 30 天 / 90 天 / 全部，自动算对应区间日均；
+  默认**近 3 天**，并记住你的上次选择（localStorage）
 - 实时推送（SSE），数据源变化即自动刷新
 - 单文件 exe，无需安装 Python
 - 本地运行，数据不上传
@@ -33,7 +34,7 @@ agent-usage.exe [--port 8765] [--no-open] [--interval 5] [--full]
 | Kimi Code | 精确 | `~/.kimi/sessions/**/wire.jsonl` | 本地 wire 协议含 token_usage |
 | WorkBuddy | 精确 | `~/.workbuddy/projects/**/*.jsonl` | 每轮模型调用带 `usage`（prompt/completion/total_tokens），逐轮累加即真实计费量 |
 | CodeBuddy | 估算 | `~/.codebuddy/projects/**/*.jsonl` | 文本长度估算 |
-| 豆包工作 | 四层校准 | timeline API → Local Storage → IndexedDB → trajectory | 云端应用，四层数据源降级 |
+| 豆包工作 | 四层校准 | timeline API → IndexedDB → Local Storage → trajectory | 云端应用；系数由 IndexedDB 硬锚点实测（见下节） |
 | 千问工作 | 估算 | `~/.qwenworkcn/projects/**/*.jsonl` | jsonl 无 usage 字段，文本长度估算 |
 | ZCode | 精确 | `~/.zcode/cli/db/db.sqlite` | 本地 SQLite 用量记录 |
 
@@ -59,82 +60,105 @@ WorkBuddy 的 jsonl 每轮调用都带真实 `usage`，但有两个坑：
 | 层级 | 数据源 | 精确度 | 触发条件 | 降级策略 |
 |---|---|---|---|---|
 | 1 | timeline API | 最精确 | 配置了 cookie | 失败→降级到本地 |
-| 2 | Local Storage 百分比 | 精确 | 找到 usedThisPeriod 字段 | 失败→降级到文本 |
-| 3 | IndexedDB 精确 token | 精确（当前会话） | 扫到 inputTokensI/outputTokensI | 作为参考值 |
+| 2 | IndexedDB 精确 token | **最硬（直接测量）** | 扫到逐次调用的 input/output token | 用于**校准系数**（见下节），并作参考值 |
+| 3 | Local Storage 百分比 | 精确 | 找到 usedThisPeriod 字段 | 失败→降级到文本 |
 | 4 | trajectory 文本估算 | 最粗 | 兜底方案 | 任何情况都能跑 |
 
-### 校准系数（暂定，非精确）
+### 系数校准：1% 等于多少 token（怎么算出来的）
 
-- **`TOKENS_PER_PCT = 2_300_000`（1% ≈ 230 万 token）**，来自 **IndexedDB 硬锚点直接测量**。
+豆包是**云端应用**，本地没有权威 token 账本，而它的用量接口**只返回百分比**——
+timeline API 每条只给 `quota_source.display_text`（如 `"0.15%"`），配额接口只给
+`used_percent`，**没有任何绝对 token 字段**（本地与 API 都翻遍了，这是事实，不是没挖到）。
 
-### ★ 硬锚点（2026-09-21 实测，一锤定音）
+所以核心问题只有一个：**1% = 多少 token？** 用两条互相独立的路径求解。
 
-```bash
-python tools/calibrate_doubao.py          # 自动找锚点，输出如下
+> **现行采用值：`TOKENS_PER_PCT = 2_300_000`（1% ≈ 230 万 token）**，来自方法一的硬锚点直接测量。
+
+#### 方法一：硬锚点直接测量（主，一锤定音）
+
+**关键发现**：本地 IndexedDB（`http_127.0.0.1_5188`）保存了**真实逐次 API 调用的
+input/output token**，且 input 随上下文单调递增（7,212 → 19,660）——
+API 就是按每次调用的 `input_tokens` 累加计费的，所以**这个累加值就是真实计费量**。
+（时间戳是 ISO 8601 字符串，不是 varint；曾按 varint 解析失败而误判它"不可用"。）
+
+把它与 timeline 的同时间窗百分比对齐，并验证两者 `quota_source_code`
+同为 `doubao_personal_vip_quota`（**同一额度池**，保证可比）：
+
+```
+65 次真实调用 Σ = 999,454 tok   (09-20 01:46:22 ~ 01:59:23)
+timeline 同窗 3 条 Σ = 0.430%
+⇒ 1% = 999,454 / 0.430 = 232.4 万 token   ⇒ 取整 230 万
 ```
 
-```
-★ 硬锚点（直接测量，优先于一切重建法）：
-   65 次真实调用 Σ=999,454 tok (09-20 01:46~01:59) ↔ timeline 3 条 Σ=0.430% [同额度池]
-   ⇒ 1% = 2,324,312 token（232 万）
-```
+这是**直接测量**，不是估算。
 
-原理：本地 IndexedDB（`http_127.0.0.1_5188`）保留了**真实逐次 API 调用的
-input/output token**（随上下文单调递增），时间戳是 ISO 字符串。
-把它的时间窗与 timeline API 的同窗百分比对齐，且两者 `quota_source_code`
-都是 `doubao_personal_vip_quota`（同一额度池）⇒ 直接测得 1% = 232 万，取整 **230 万**。
+#### 方法二：agent 模式重建（兜底，只给下界）
 
-这是**直接测量**，不是估算。重建法只得下界 ≈51 万（只覆盖 agent 模式，
-陪伴/普通对话不在 `.sessions` 目录），比锚点低 4.5 倍，只配做兜底。
-
-#### 一键重算（推荐，别再手工推）
-
-```bash
-python tools/calibrate_doubao.py                    # 只算不改，输出下界区间 + 当前系数对比
-python tools/calibrate_doubao.py --uplift 2 --apply  # 留出未建模余量并写回 plugins/doubao.py
-python tools/calibrate_doubao.py --anchor 1.5e8      # 拿到硬锚点：一击钉死
-```
-
-脚本会跑 7 个互相独立的算法（数据：47 会话 / 1504 turn / 2856 次模型调用 / 3043 次工具调用）：
+按 agent 循环语义重建每个会话的模型调用消耗，跑多个变体做敏感性分析
+（数据：47 会话 / 1504 turn / 2856 次模型调用 / 3043 次工具调用）：
 
 | 算法 | 推算 1% |
 |---|---|
 | 1 裸模型调用（仅消息体） | 46.7 万 |
-| 2 + system prompt(2671 tok × 2856) | 48.2 万 |
+| 2 + system prompt(2,671 tok × 2856) | 48.2 万 |
 | 3 + tool schema 5K | 51.1 万 |
 | 4 单 turn 均值 160,036 ÷ 单条均值 0.313% | 51.1 万 |
 | 3 + tool schema 10K | 53.9 万 |
 | F timeline 逐条匹配 1431/1595（90%）Σtok/Σ% | 56.7 万 |
 | 3 + tool schema 20K | 59.7 万 |
 
-**下界区间 46.7 ~ 59.7 万，中位 ≈51 万**，且全部只统计 agent 模式（.sessions 目录）。
+**下界区间 46.7 ~ 59.7 万，中位 ≈51 万。**
 
-#### 旧值对照（已作废）
+它比硬锚点低 **4.5 倍**，原因很明确：重建只能覆盖 agent 模式（`.sessions` 目录），
+**陪伴/角色扮演、普通对话、图像、其他模型、premium 倍率、思维链 token 全不在内**。
+所以重建法**只配做兜底与交叉验证，不能当采用值**。
+
+#### 一键复现（两条路径都在同一个脚本里）
+
+```bash
+python tools/calibrate_doubao.py                     # 只算不改：先找硬锚点，再输出下界区间
+python tools/calibrate_doubao.py --apply             # 命中硬锚点则直接写回 plugins/doubao.py
+python tools/calibrate_doubao.py --anchor 1.5e8      # 有单窗口绝对配额时一击钉死
+python tools/calibrate_doubao.py --root "D:/xx/DoubaoWork/User Data/Default"   # 换机器
+```
+
+#### 取值与旧值对照
 
 | 版本 | 值 | 状态 |
 |---|---|---|
-| commit `90c788c` | 500 万 | ❌ 十倍误改，无依据 |
-| 重建法 v1 | 47.8 万 | ❌ 漏算（已作废） |
-| 重建法 v2 | 113.6 万 | ❌ 重复计算（已作废） |
-| 重建下界 v3 | ≈51 万 | ⚠️ 仅兜底，只覆盖 agent 模式 |
+| commit `90c788c` | 500 万 | ❌ 十倍误改，diff 一行、无依据 |
+| 重建法 v1 | 47.8 万 | ❌ 漏算（只算消息体） |
+| 重建法 v2 | 113.6 万 | ❌ **重复计算**（见下方陷阱） |
+| 重建法 v3 | ≈51 万 | ⚠️ 仅兜底下界 |
 | **硬锚点（现行）** | **230 万** | ✅ 直接测量 |
 
-修正后豆包总量由 5.99 亿 → **11.48 亿**（全站 190.07 亿）。
+采用 230 万后，豆包总量由 5.99 亿 → **11.48 亿**（全站 190.07 亿）。
 
-⚠️ 两次踩坑，改系数前务必先读：
-- `5_000_000`（500 万）：commit `90c788c` 的 10 倍误改，diff 一行、无依据。
-- **重复计算陷阱**：曾在 tool 消息处额外加一次“上下文重放” ⇒ 同一份 input 算两遍，
-  高估约 2 倍，一度得出“113.6 万”。**工具结果已进 ctx，下次调用的 `ctx_before` 本就包含它，
-  不可再加。** 正确模型：一次 assistant 消息 = 一次模型调用，消耗 = 累积上下文 + 本条。
+#### 建模陷阱（改算法前必读）
 
-#### 如何钉死精确值
+**正确模型**：一次 assistant 消息 = 一次模型调用，消耗 = `累积上下文 + 本条输出`。
 
-在豆包用量页读取“占 7 天额度”旁的**绝对已用/总额**，或订阅计划的单窗口 token 配额，然后：
+1. **漏算**：只算消息体，忽略上下文重发 → 得 47.8 万（v1）。
+2. **重复算（更隐蔽）**：曾在 tool 消息处额外加一次「上下文重放」，
+   但**工具结果已经进了 `ctx`，下次调用的 `ctx_before` 本就包含它**
+   ⇒ 同一份 input 算两遍，高估约 2 倍 → 一度得出 113.6 万（v2）。**不可再加。**
+
+另两点：
+
+- tool schema 本地**不落盘**（trajectory 只存 tool_calls 不存 schema），
+  所以用 5K/10K/20K 做敏感性扫描，而不是假装已知。
+- 算法 F 必须用**聚合口径 Σtok/Σ%**，不能看中位数——ratio 分布极度右偏
+  （25%=26万 / 50%=86万 / 75%=309万 / 90%=1450万），中位数会被海量小条目拉低。
+
+#### 如何进一步钉死
+
+若能在豆包用量页读到「占 7 天额度」旁的**绝对已用/总额**，或订阅计划的单窗口配额：
 
 ```bash
 python tools/calibrate_doubao.py --anchor <一个7天窗口的token数> --apply
 ```
-- ⚠️ 历史坑：commit `90c788c` 误将系数改大 10 倍，导致豆包用量虚高至 24.96 亿，已回退。
+
+- 用户已确认：百分比是**累加**的（首窗 + 重置 4 次 = 500%），不是单窗口封顶。
 
 ### 可选 cookie 配置
 
