@@ -60,8 +60,8 @@ def _parse(path):
 
 
 def scan(full, need, mark):
-    out = []
-    daily_total = {}  # day -> {input, output, cache_r, cache_w}
+    daily_rows = []
+    daily_files = []
     for pat in ('*/*/wire.jsonl', '*/wire.jsonl'):
         files = glob_files(_ROOT, pat)
         for p in files:
@@ -77,25 +77,30 @@ def scan(full, need, mark):
                 total = tokens['input'] + tokens['output'] + tokens['cache_r'] + tokens['cache_w']
                 if total < 1000:
                     continue
-                if day not in daily_total:
-                    daily_total[day] = {'input': 0, 'output': 0, 'cache_r': 0, 'cache_w': 0}
-                daily_total[day]['input'] += tokens['input']
-                daily_total[day]['output'] += tokens['output']
-                daily_total[day]['cache_r'] += tokens['cache_r']
-                daily_total[day]['cache_w'] += tokens['cache_w']
+                daily_rows.append({
+                    'agent': KEY, 'day': day, 'source_file': p,
+                    'tokens': total, 'est': 0,
+                })
+            daily_files.append(p)
             mark(p, fp)
-    # 生成按天的 sessions（每天只生成一个，避免 session_id 重复被覆盖）
-    for day, tokens in daily_total.items():
-        total = tokens['input'] + tokens['output'] + tokens['cache_r'] + tokens['cache_w']
+    # 生成按天的汇总 sessions（每天只生成一个，用于总用量统计）
+    daily_total = {}
+    for d in daily_rows:
+        day = d['day']
+        if day not in daily_total:
+            daily_total[day] = 0
+        daily_total[day] += d['tokens']
+    out = []
+    for day, total in daily_total.items():
         ts_ms = int(time.mktime(time.strptime(day, '%Y-%m-%d')) * 1000)
         out.append({
             'agent': KEY, 'session_id': f'kimi-{day}',
             'title': f'Kimi {day}',
             'cwd': '', 'model': 'kimi', 'provider': 'moonshot',
             'created_at': ts_ms, 'last_activity_at': ts_ms,
-            'input_tokens': tokens['input'], 'output_tokens': tokens['output'],
-            'cache_read_tokens': tokens['cache_r'], 'cache_write_tokens': tokens['cache_w'],
+            'input_tokens': 0, 'output_tokens': 0,
+            'cache_read_tokens': 0, 'cache_write_tokens': 0,
             'total_tokens': total, 'cost': None, 'est': 0,
             'source_file': _ROOT,
         })
-    return out
+    return {'sessions': out, 'daily': daily_rows, 'daily_files': daily_files}

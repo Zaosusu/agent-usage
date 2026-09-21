@@ -108,6 +108,10 @@ def scan(full=False, only=None):
     con = _conn()
     now = int(time.time() * 1000)
 
+    # 读取上次总用量，用于异常检测
+    prev_total_row = con.execute('select value from meta where key=?', ('total_tokens',)).fetchone()
+    prev_total = int(prev_total_row[0]) if prev_total_row else 0
+
     def need(f, path, fp):
         if f:
             return True
@@ -121,6 +125,7 @@ def scan(full=False, only=None):
             ('fp:' + path, fp))
 
     stats = {}
+    changed_files = 0
     for plug in plugins:
         key = plug['key']
         if only and key not in only:
@@ -136,6 +141,7 @@ def scan(full=False, only=None):
             rows = result.get('sessions') or []
             daily_rows = result.get('daily') or []
             daily_files = result.get('daily_files') or []
+            changed_files += len(daily_files)
         else:
             rows = result
             daily_rows = []
@@ -178,8 +184,23 @@ def scan(full=False, only=None):
         stats[key] = {'status': 'ok', 'upserted': upserted,
                       'seconds': round(time.time() - t0, 2)}
 
+    # 计算本次总用量
+    current_total_row = con.execute('select sum(total_tokens) from sessions').fetchone()
+    current_total = int(current_total_row[0] or 0)
+
+    # 异常检测：如果总用量下降超过 10%，自动触发全量扫描纠错
+    if not full and prev_total > 0 and current_total > 0:
+        drop_ratio = (prev_total - current_total) / prev_total
+        if drop_ratio > 0.1:
+            stats['_auto_full_rescan'] = f'总用量下降 {drop_ratio*100:.1f}%，自动触发全量纠错'
+            con.close()
+            return scan(full=True, only=only)
+
     con.execute('insert or replace into meta(key, value) values(?,?)',
                 ('last_scan_ms', str(now)))
+    # 存本次总用量，用于下次增量扫描的异常检测
+    con.execute('insert or replace into meta(key, value) values(?,?)',
+                ('total_tokens', str(current_total)))
     con.commit()
 
     # 收集本次扫描实际出现的 agent（含多 agent 插件的子 agent），用于清理残留
