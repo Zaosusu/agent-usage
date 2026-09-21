@@ -5,7 +5,7 @@
 2. Local Storage 订阅百分比（本地）：从 leveldb 读 usedThisPeriod/monthlyLimit
 3. trajectory 文本估算（兜底，按日期分布）：扫 .sessions 目录，按天拆分
 
-校准系数（重要，见下方说明）：TOKENS_PER_PCT = 1_500_000（暂定 1% ≈ 150 万 token）。
+校准系数（重要，见下方说明）：TOKENS_PER_PCT = 1_200_000（1% ≈ 120 万 token）。
 
 【为什么是“暂定”而非“精确校准”】
 - 豆包的 timeline API 只返回百分比（quota_source.display_text，如 "0.15%"），
@@ -24,7 +24,7 @@
     | D C + tool schema 10K | 127.8 万 |
     | F timeline 逐条匹配 1427/1595(覆盖 83%) Σtok/Σ% | 138.1 万 |
     | D C + tool schema 20K | 139.0 万 |
-  **有效区间 113.6 ~ 139.0 万，中位 ≈125 万** ⇒ 取 150 万留出未建模用量（普通对话/图像）余量。
+  **有效区间 113.6 ~ 139.0 万，中位 ≈125 万** ⇒ 取整数 **120 万**（贴近中位，取整便于口算）。
 - ⚠️ 已作废的旧结论：早期“简化重建 = 2.385 亿 ⇒ 1% ≥ 47.8 万”**低估约 2.4 倍**——
   它漏算了 agent 循环里每次工具调用都要重放一遍完整上下文（2739 次），不可再用。
 
@@ -40,9 +40,9 @@ NAME = '豆包工作'
 ESTIMATE = True
 WATCH_PATHS = ['%USERPROFILE%\\AppData\\Local\\DoubaoWork\\User Data\\Default']
 
-# 系数：1% ≈ 150 万 token。7 算法收敛于 113.6~139.0 万（中位 125 万，均为 agent 模式下界），
-# 取 150 万留出未建模用量余量。500 万已证伪为 10 倍误改；旧“47.8 万”因漏算工具重放已作废。
-TOKENS_PER_PCT = 1_500_000
+# 系数：1% ≈ 120 万 token。7 算法收敛于 113.6~139.0 万（中位 125 万，均为 agent 模式下界），
+# 取整为 120 万。500 万已证伪为 10 倍误改；旧“47.8 万”因漏算工具调用上下文重放已作废。
+TOKENS_PER_PCT = 1_200_000
 
 _DEFAULT_ROOT = os.path.expanduser(WATCH_PATHS[0].replace('%USERPROFILE%', os.path.expanduser('~')))
 
@@ -216,6 +216,22 @@ def _scan_trajectory_daily():
     return daily
 
 
+def _wrap_result(sessions, daily_map, source):
+    """按引擎新协议返回 {sessions, daily, daily_files}，让豆包进入按天曲线。
+
+    之前只返回 sessions 列表（旧协议），引擎拿不到 daily，导致豆包的每日用量
+    只进 sessions（总量 KPI）而按天曲线始终为空——今天/按天视图看不到豆包。
+    注意：daily 主键是 (agent, day, source_file)，故 source_file 必须按天唯一，
+    否则同一天多行互相覆盖（历史踩过的坑）。
+    """
+    daily_rows = [{'agent': KEY, 'day': d, 'source_file': f'doubao-{d}',
+                   'tokens': int(t), 'est': 1}
+                  for d, t in daily_map.items() if t >= 1000]
+    # daily_files 带上旧的共享 source，用于清理历史遗留行
+    daily_files = [f'doubao-{d}' for d in daily_map] + [source]
+    return {'sessions': sessions, 'daily': daily_rows, 'daily_files': daily_files}
+
+
 def scan(full, need, mark):
     cookie = _extract_cookie()
     api_pct, api_count, api_daily = _fetch_timeline(cookie)
@@ -241,6 +257,8 @@ def scan(full, need, mark):
     if total_est == 0 and idx_in + idx_out == 0:
         return []
 
+    daily_map = {}   # day -> tokens，供 daily 表使用
+
     # 优先用 API 的按日期数据
     if daily_pct and total_est > 0:
         sessions = []
@@ -251,6 +269,7 @@ def scan(full, need, mark):
             day_tokens = int(pct * TOKENS_PER_PCT)
             if day_tokens < 1000:
                 continue
+            daily_map[day] = day_tokens
             ts_ms = int(time.mktime(time.strptime(day, '%Y-%m-%d')) * 1000)
             sessions.append({
                 'agent': KEY,
@@ -270,7 +289,7 @@ def scan(full, need, mark):
                 'est': 1,
                 'source_file': source,
             })
-        return sessions
+        return _wrap_result(sessions, daily_map, source)
 
     # 兜底：按 trajectory 日期分布拆分
     if daily_traj and total_est > 0:
@@ -284,6 +303,7 @@ def scan(full, need, mark):
                 day_tokens = int(total_est * traj_tok / traj_total)
                 if day_tokens < 1000:
                     continue
+                daily_map[day] = day_tokens
                 ts_ms = int(time.mktime(time.strptime(day, '%Y-%m-%d')) * 1000)
                 sessions.append({
                     'agent': KEY,
@@ -303,9 +323,9 @@ def scan(full, need, mark):
                     'est': 1,
                     'source_file': source,
                 })
-            return sessions
+            return _wrap_result(sessions, daily_map, source)
 
-    return [{
+    return _wrap_result([{
         'agent': KEY,
         'session_id': 'doubao-local',
         'title': f'豆包工作（{source}）',
@@ -322,4 +342,4 @@ def scan(full, need, mark):
         'cost': None,
         'est': 1,
         'source_file': source,
-    }]
+    }], daily_map, source)
