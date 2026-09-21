@@ -116,6 +116,7 @@ def rebuild_sessions(root, verbose=True):
     by_key = {}            # 消息 key -> token（含 system prompt）
     by_key_ns = {}         # 消息 key -> token（不含）
     ctx_list = []          # 每次调用时的上下文长度（用于物理合理性检验）
+    output_cost = 0        # 输出侧合计（assistant 本条），用于推理 token 影响估算
 
     for fp in files:
         try:
@@ -161,6 +162,7 @@ def rebuild_sessions(root, verbose=True):
                 cur_key_tok += ctx + t + sys_avg
                 cur_key_tok_ns += ctx + t
                 ctx_list.append(ctx)
+                output_cost += t
                 ctx += t
             elif role == 'tool':
                 # 只进上下文，不另计消耗（它的成本体现在下一次调用的 input 里）
@@ -180,6 +182,7 @@ def rebuild_sessions(root, verbose=True):
     stats['by_key'] = by_key
     stats['by_key_ns'] = by_key_ns
     stats['ctx_list'] = ctx_list
+    stats['output_cost'] = output_cost
     stats['sys_avg'] = sys_avg
     stats['n_sys'] = n_sys
     if verbose:
@@ -361,6 +364,33 @@ def main():
         print(f'         230 万 ⇒ 账户均值 {m["tl_total"]*230e4/n:,.0f} tok，'
               f'要求单次调用平均 {m["tl_total"]*230e4/n/avg_ctx:.1f} 倍于 agent 实测值，')
         print(f'         且绝对数远超任何模型的上下文窗口 —— 物理上不成立。')
+
+    # ④ 已知偏差：推理 token 不可见（影响有界，需说明）
+    print()
+    print('-' * 72)
+    print('④ 已知偏差：推理(thinking) token 本地不可见')
+    in_side = stats['call_cost']
+    out_side = stats.get('output_cost', 0)
+    if out_side and in_side:
+        tot = in_side + out_side
+        share = out_side / tot
+        print(f'   豆包 planner 用 doubao-seed-2-1-turbo（支持深度思考），'
+              f'但 trajectory 只记 user/assistant/tool，无 reasoning 字段')
+        print(f'   ⇒ 推理 token 消耗了但本地看不见，重建值天然偏低')
+        print(f'   拆解：输入侧 {in_side:,.0f}（{in_side/tot*100:.1f}%）/ '
+              f'输出侧 {out_side:,.0f}（{out_side/tot*100:.1f}%）')
+        print(f'   推理只加在输出侧 ⇒ 总消耗增幅 = {share*100:.1f}% × (R-1)')
+        print()
+        print(f'   {"推理倍数 R":<14}{"总消耗增幅":>12}{"修正后系数":>14}')
+        print('   ' + '-' * 40)
+        for R in (1, 3, 10, 20):
+            add = share * (R - 1)
+            print(f'   R = {R:<11}{add*100:>11.1f}%{rec*(1+add)/1e4:>12.1f} 万')
+        need = 230e4 / rec - 1
+        print()
+        print(f'   ⇒ 要到 230 万需总消耗 +{need*100:.0f}%，'
+              f'即推理量须达可见输出的 {need/share+1:.0f} 倍 —— 不现实。')
+        print(f'   ⇒ 合理估计推理使系数 +10~30%，真值约 {rec*1.1/1e4:.0f}~{rec*1.3/1e4:.0f} 万。')
 
     cur = _current_coef()
     if cur:
