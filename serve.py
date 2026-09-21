@@ -251,10 +251,10 @@ class Handler(BaseHTTPRequestHandler):
             'agent_count': len(agents),
             'agents': [
                 {
-                    'key': a.get('agent'),
-                    'name': a.get('title', a.get('agent')),
+                    'key': a.get('key'),
+                    'name': a.get('name', a.get('key')),
                     'total_tokens': a.get('total_tokens', 0),
-                    'sessions': a.get('session_count', 0),
+                    'sessions': a.get('count', 0),
                     'estimate': a.get('est', 0),
                 }
                 for a in agents
@@ -269,7 +269,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({'ok': False, 'error': '尚未扫描'}, 404)
             return
         agents = data.get('agents', [])
-        found = [a for a in agents if a.get('agent') == key]
+        found = [a for a in agents if a.get('key') == key]
         if not found:
             self._send_json({'ok': False, 'error': f'agent {key} 未找到'}, 404)
             return

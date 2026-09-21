@@ -171,9 +171,12 @@ def scan(full=False, only=None):
                   r['source_file'], now))
             upserted += 1
         # 按天真实聚合（插件返回的 daily）：先删该数据源旧行，再插入
-        # 一个插件可能报多个 agent（如 ccswitch 同时报 codex+claude），按 source_file 删
+        # 删除范围必须同时限定 agent：一个插件可能报多个 agent（如 ccswitch 同时报 codex+claude），
+        # 若只按 source_file 删，会误删同源下其他 agent 的行。
+        agents_in_rows = {key} | {d.get('agent', key) for d in daily_rows}
         for df in daily_files:
-            con.execute('delete from daily where source_file=?', (df,))
+            for ag in agents_in_rows:
+                con.execute('delete from daily where agent=? and source_file=?', (ag, df))
         for d in daily_rows:
             d_agent = d.get('agent', key)
             con.execute(

@@ -5,7 +5,7 @@
 2. Local Storage 订阅百分比（本地）：从 leveldb 读 usedThisPeriod/monthlyLimit
 3. trajectory 文本估算（兜底，按日期分布）：扫 .sessions 目录，按天拆分
 
-校准系数：1% ≈ 50 万 token（通过 timeline + 本地 trajectory 交叉校准）
+校准系数：1% ≈ 500 万 token（TOKENS_PER_PCT = 5_000_000，通过 timeline + 本地 trajectory 交叉校准）
 """
 import os, re, json, time, urllib.request
 from engine.common import collect_strings, estimate_tokens

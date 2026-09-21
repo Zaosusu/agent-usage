@@ -15,6 +15,12 @@
     2. 展开 WATCH_PATHS 中的 %USERPROFILE%；
     3. 用 need()/mark() 做文件级增量指纹，跳过未变化的文件；
     4. 汇总所有插件的会话做聚合与烘焙。
+
+  注意（返回 dict 协议时）：
+    scan 也可返回 {'sessions': [...], 'daily': [...], 'daily_files': [...]}。
+    daily 表主键为 (agent, day, source_file)，同一 (agent, day, source_file) 会互相覆盖。
+    若一个数据源内含多个会话（如读一张 DB 表），daily 行的 source_file 必须按会话唯一
+    （如 f'{DBP}#{session_id}'），否则同一天的多会话会被覆盖，导致按天曲线偏低。
 """
 import os
 import sys

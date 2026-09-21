@@ -8,9 +8,8 @@ build/
 dist/
 *.spec
 
-# Runtime data
-data/usage.db
-data/usage.json
+# Runtime data（整个 data/ 都是本地运行态，含数据库与插件缓存，永不入库）
+data/
 
 # IDE
 .vscode/

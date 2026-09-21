@@ -31,7 +31,7 @@ agent-usage.exe [--port 8765] [--no-open] [--interval 5] [--full]
 | --- | --- | --- | --- |
 | Codex / Claude | 精确 | CC Switch `proxy_request_logs` | 代理层记录每次请求的 input/output/cache tokens |
 | Kimi Code | 精确 | `~/.kimi/sessions/**/wire.jsonl` | 本地 wire 协议含 token_usage |
-| WorkBuddy | 估算 | `~/.workbuddy/workbuddy.db` | credit 花费按 ¥2/百万 tokens 折算 |
+| WorkBuddy | 混合 | `~/.workbuddy/workbuddy.db` + `~/.workbuddy/projects/**/*.jsonl` | 老会话读 `session_usage.credit_json` 真实花费（¥2/百万 tokens 折算）；新版本不再写 credit_json，其会话改从 jsonl 文本估算 |
 | CodeBuddy | 估算 | `~/.codebuddy/projects/**/*.jsonl` | 文本长度估算 |
 | 豆包工作 | 四层校准 | timeline API → Local Storage → IndexedDB → trajectory | 云端应用，四层数据源降级 |
 | 千问工作 | 估算 | `~/.qwenworkcn/projects/**/*.jsonl` | jsonl 无 usage 字段，文本长度估算 |
@@ -52,7 +52,7 @@ agent-usage.exe [--port 8765] [--no-open] [--interval 5] [--full]
 
 ### 校准系数
 
-- **1% ≈ 50 万 token**
+- **1% ≈ 500 万 token**（`TOKENS_PER_PCT = 5_000_000`）
 - 校准依据：12 天 1171 条 = 419% ≈ 2 亿 token（API + 本地交叉验证）
 
 ### 可选 cookie 配置
@@ -116,6 +116,12 @@ def scan(full, need, mark):
 ```
 
 重启即可。
+
+> **插件返回 `daily` 时的硬性约定**：`daily` 表主键是 `(agent, day, source_file)`。
+> 若你的插件在 `daily` 里用**同一个 `source_file`** 上报多条同一天的数据，它们会互相覆盖，
+> 导致「总用量正确、但按天曲线偏低」。凡是**一个数据源内含多个会话**（如读一张 DB 表、
+> 一个目录下的多个会话）的插件，`source_file` 必须**按会话唯一**（例如 `f'{DBP}#{session_id}'`）。
+> 会话天然分散在不同文件的插件（多数 jsonl 类）不受影响。
 
 ### 方式二：API 自助接入
 
