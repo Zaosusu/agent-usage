@@ -13,24 +13,35 @@
   因此无法像 WorkBuddy 那样拿到硬锚点做 1:1 反推。
 - 已确认错误：commit 90c788c 把原本正确的 500_000 误改成 5_000_000（diff 仅一行、
   commit message 无依据），导致豆包用量虚高 10 倍（24.96 亿），已回退。
-- **多算法收敛（2026-09-21，7 个互相独立的算法）**：全部只统计 agent 模式，故均为下界。
-    数据规模：47 会话 / 1504 turn / 2856 assistant / **2739 工具调用** / 5595 模型调用。
+- **下界重建（2026-09-21；已固化为 tools/calibrate_doubao.py，可一键复现）**：
+    数据规模：47 会话 / 1504 turn / 2856 次模型调用 / 3043 次工具调用。
     | 算法 | 推算 1% |
     |---|---|
-    | A agent 循环重建（含工具调用上下文重放） | 113.6 万 |
-    | C A + system prompt(2671tok×5595) | 116.6 万 |
-    | D C + tool schema 5K | 122.2 万 |
-    | E 单 turn 均值 382,504 tok ÷ 单条均值 0.313% | 122.2 万 |
-    | D C + tool schema 10K | 127.8 万 |
-    | F timeline 逐条匹配 1427/1595(覆盖 83%) Σtok/Σ% | 138.1 万 |
-    | D C + tool schema 20K | 139.0 万 |
-  **有效区间 113.6 ~ 139.0 万，中位 ≈125 万** ⇒ 取整数 **120 万**（贴近中位，取整便于口算）。
-- ⚠️ 已作废的旧结论：早期“简化重建 = 2.385 亿 ⇒ 1% ≥ 47.8 万”**低估约 2.4 倍**——
-  它漏算了 agent 循环里每次工具调用都要重放一遍完整上下文（2739 次），不可再用。
+    | 1 裸模型调用（仅消息体） | 46.7 万 |
+    | 2 + system prompt(2671 tok × 2856) | 48.2 万 |
+    | 3 + tool schema 5K | 51.1 万 |
+    | 4 单 turn 均值 160,036 ÷ 单条均值 0.313% | 51.1 万 |
+    | 3 + tool schema 10K | 53.9 万 |
+    | F timeline 逐条匹配 1431/1595(90%) Σtok/Σ% | 56.7 万 |
+    | 3 + tool schema 20K | 59.7 万 |
+  **下界区间 46.7 ~ 59.7 万，中位 ≈51 万**。全部只统计 agent 模式（.sessions 目录），
+  普通对话 / 图像 / 其他模型 / premium 倍率 / 思维链 token 都不在内 ⇒ **均为下界**。
+- **现取 120 万 ≈ 下界中位 × 2.35**：这是**有意留给未建模用量的余量，不是校准值**。
+  （用户 2026-09-21 拍定：认为 50 万对自身用量偏低。）若日后拿到硬锚点，以锚点为准。
 
-【如何钉死精确值（待办）】
-拿到“一个 7 天窗口 = 多少 token”的绝对数即可：在豆包用量页读取“占 7 天额度”旁的绝对
-已用/总额，或提供订阅计划的单窗口 token 配额，即可把 TOKENS_PER_PCT 改成准确值。
+- ⚠️ 两次踩坑，改系数前务必先读：
+    ① commit 90c788c 把 500_000 拍成 5_000_000（10 倍虚高，diff 一行、无依据）。
+    ② 曾在 tool 消息处**额外加一次“上下文重放”** ⇒ 同一份 input 算了两遍，高估约 2 倍，
+       一度得出“113.6 万”。**工具结果已进 ctx，下一次调用的 ctx_before 本就包含它，
+       不可再加。** 正确模型：一次 assistant 消息 = 一次模型调用，消耗 = 累积上下文 + 本条。
+
+【如何钉死精确值】
+拿到“一个 7 天窗口 = 多少 token”的绝对数即可一击锁死：
+    python tools/calibrate_doubao.py --anchor 1.5e8 --apply
+数字来源：豆包用量页“占 7 天额度”旁的绝对已用/总额，或订阅计划的单窗口 token 配额。
+不确定的时候，重跑校准器看当下下界：
+    python tools/calibrate_doubao.py            # 只算不改
+    python tools/calibrate_doubao.py --uplift 2 --apply
 """
 import os, re, json, time, urllib.request
 from engine.common import collect_strings, estimate_tokens
@@ -47,17 +58,17 @@ TOKENS_PER_PCT = 1_200_000
 _DEFAULT_ROOT = os.path.expanduser(WATCH_PATHS[0].replace('%USERPROFILE%', os.path.expanduser('~')))
 
 
-def _fetch_timeline(cookie_str):
-    """拉 timeline API，返回 (总百分比, 记录数, {日期: 当日百分比})"""
-    if not cookie_str:
-        return None, None, {}
-    qs = ("version_code=20800&language=zh&device_platform=web"
-          "&aid=497858&real_aid=497858&pkg_type=release_version"
-          "&device_id=7667391337516697151&pc_version=3.37.5"
-          "&doubao_pc_version=3.37.5&web_id=7505737990292227620"
-          "&tea_uuid=7505737990292227620&region=CN&sys_region=CN"
-          "&samantha_web=1&web_platform=browser&use-olympus-account=1")
-    headers = {
+_TIMELINE_QS = ("version_code=20800&language=zh&device_platform=web"
+                "&aid=497858&real_aid=497858&pkg_type=release_version"
+                "&device_id=7667391337516697151&pc_version=3.37.5"
+                "&doubao_pc_version=3.37.5&web_id=7505737990292227620"
+                "&tea_uuid=7505737990292227620&region=CN&sys_region=CN"
+                "&samantha_web=1&web_platform=browser&use-olympus-account=1")
+_TIMELINE_URL = f"https://www.doubao.com/alice/commerce/usage/timeline/?{_TIMELINE_QS}"
+
+
+def _timeline_headers(cookie_str):
+    return {
         "Cookie": cookie_str,
         "Referer": "https://www.doubao.com/chat",
         "User-Agent": "Mozilla/5.0",
@@ -65,6 +76,13 @@ def _fetch_timeline(cookie_str):
         "accept": "application/json",
         "content-type": "application/json",
     }
+
+
+def _fetch_timeline(cookie_str):
+    """拉 timeline API，返回 (总百分比, 记录数, {日期: 当日百分比})"""
+    if not cookie_str:
+        return None, None, {}
+    headers = _timeline_headers(cookie_str)
     all_pct = 0.0
     count = 0
     daily = {}
@@ -72,8 +90,8 @@ def _fetch_timeline(cookie_str):
     try:
         for _ in range(200):
             body = json.dumps({"cursor": cursor} if cursor else {}).encode()
-            url = f"https://www.doubao.com/alice/commerce/usage/timeline/?{qs}"
-            req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+            req = urllib.request.Request(_TIMELINE_URL, data=body,
+                                         headers=headers, method="POST")
             r = json.loads(urllib.request.urlopen(req, timeout=15).read())
             d = r.get("data", {})
             entries = d.get("entries", [])
@@ -102,6 +120,46 @@ def _fetch_timeline(cookie_str):
     except Exception:
         return None, None, {}
     return all_pct, count, daily
+
+
+def _fetch_timeline_entries(cookie_str):
+    """拉 timeline 逐条 [(display_name, pct)]。
+
+    仅供 tools/calibrate_doubao.py 的“算法 F”使用：把每条用量按用户消息文本
+    与本地 trajectory 的 turn 一一对上，做 Σtok/Σ% 聚合反推。
+    与 _fetch_timeline 共用同一套请求参数，避免逻辑漂移。
+    """
+    if not cookie_str:
+        return []
+    headers = _timeline_headers(cookie_str)
+    out = []
+    cursor = None
+    try:
+        for _ in range(200):
+            body = json.dumps({"cursor": cursor} if cursor else {}).encode()
+            req = urllib.request.Request(_TIMELINE_URL, data=body,
+                                         headers=headers, method="POST")
+            d = json.loads(urllib.request.urlopen(req, timeout=15).read()).get("data", {})
+            entries = d.get("entries", [])
+            if not entries:
+                break
+            for e in entries:
+                u = e.get("usage", {})
+                pct_str = u.get("quota_source", {}).get("display_text", "0%")
+                if "<" in pct_str:
+                    pct = 0.005
+                else:
+                    try:
+                        pct = float(pct_str.replace("%", ""))
+                    except ValueError:
+                        pct = 0.0
+                out.append((u.get("display_name") or "", pct))
+            cursor = d.get("next_cursor")
+            if not d.get("has_more") or not cursor:
+                break
+    except Exception:
+        return out
+    return out
 
 
 def _extract_cookie():
