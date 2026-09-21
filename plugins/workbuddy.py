@@ -1,10 +1,23 @@
-"""WorkBuddy 用量解析（新版兼容：老会话读 session_usage，新会话从 jsonl 估算）。
+"""WorkBuddy 用量解析（真实 token 版）。
 
-老版本 WorkBuddy 把累计花费存在 session_usage.credit_json；
-新版本不再写这个字段，所以从 projects/*/*.jsonl 文件里统计消息文本估算 token。
+数据源：`~/.workbuddy/projects/*/*.jsonl`
+每个会话的 jsonl 里，每轮模型调用都带 `usage` 字段：
+  {"prompt_tokens": N, "completion_tokens": M, "total_tokens": N+M,
+   "prompt_cache_hit_tokens": ..., "prompt_cache_miss_tokens": ...}
+以及规范化版本 {"input_tokens": N, "output_tokens": M, "total_tokens": N+M, ...}
+
+重要口径说明（已实测验证）：
+1. **同一行内会出现两个 usage 字典**（原始 API 返回 + 规范化版本），
+   它们描述同一次调用，**只能取一个**，否则总量翻倍。
+2. `prompt_tokens` 每轮携带完整历史（实测前 60 轮 57 次单调递增），
+   所以**逐轮累加 total_tokens 就是真实计费量**，不需要额外换算。
+3. 因此本插件产出的是**真实 token（est=0）**，不是估算。
+
+不再使用 `session_usage.credit_json`：那是**费用**字段（元），
+与 token 的比值随模型费率浮动（实测 0.31x~12.43x），无法作为 token 计量。
 """
 from __future__ import annotations
-import json, os, re, glob, time, sqlite3
+import json, os, glob, time
 from engine.common import ro_connect
 
 KEY = 'workbuddy'
@@ -12,163 +25,176 @@ NAME = 'WorkBuddy'
 DBP = os.path.expanduser('~/.workbuddy/workbuddy.db')
 PROJECTS_ROOT = os.path.expanduser('~/.workbuddy/projects')
 WATCH_PATHS = [DBP, PROJECTS_ROOT]
-PRICE_PER_M = 2.0  # 元 / 1M tokens
 
-# 估算系数：中文 1 字 ≈ 1.5 token，英文 1 词 ≈ 0.75 token
-def _estimate_tokens(text):
-    if not text:
-        return 0
-    chinese = len(re.findall(r'[\u4e00-\u9fff]', text))
-    english = len(re.findall(r'[a-zA-Z]+', text))
-    return int(chinese * 1.5 + english * 0.75)
 
-def _money_of(credit):
-    if not credit:
-        return 0.0
-    try:
-        cd = json.loads(credit)
-        if isinstance(cd, dict):
-            return sum(float(v) for v in cd.values() if isinstance(v, (int, float)))
-    except Exception:
-        pass
-    return 0.0
+def _pick_usage(acc):
+    """同一行可能有多个 usage 字典（同一次调用的不同表示），取字段最全/总量最大的一个。"""
+    if not acc:
+        return None
+    return max(acc, key=lambda a: (int(a.get('total_tokens') or 0),
+                                   len(a)))
 
-def _tokens_of(money):
-    return int(money / PRICE_PER_M * 1_000_000) if PRICE_PER_M > 0 else 0
+
+def _walk_usage(obj, acc):
+    """递归收集含 usage 特征的字典。"""
+    if isinstance(obj, dict):
+        if ('total_tokens' in obj
+                or ('input_tokens' in obj and 'output_tokens' in obj)
+                or ('prompt_tokens' in obj and 'completion_tokens' in obj)):
+            acc.append(obj)
+        for v in obj.values():
+            _walk_usage(v, acc)
+    elif isinstance(obj, list):
+        for v in obj:
+            _walk_usage(v, acc)
+
 
 def _parse_jsonl_file(path):
-    """解析一个 WorkBuddy jsonl 会话文件，返回按天的估算 token 数和标题"""
+    """解析一个会话 jsonl。
+
+    返回 (daily, title, totals)：
+      daily  : {day: {'total':int,'input':int,'output':int,'cache_read':int,'calls':int}}
+      title  : AI 生成的标题
+      totals : 全会话汇总 dict
+    """
     daily = {}
     title = os.path.basename(path).replace('.jsonl', '')
+    seen = set()          # 去重键，防止同一次调用跨行重复计入
+    tot = {'total': 0, 'input': 0, 'output': 0, 'cache_read': 0, 'calls': 0}
+
     with open(path, 'r', encoding='utf-8', errors='ignore') as f:
         for line in f:
+            if 'total_tokens' not in line and 'input_tokens' not in line \
+                    and 'prompt_tokens' not in line:
+                continue
             try:
                 d = json.loads(line)
-            except:
+            except Exception:
                 continue
-            t = d.get('type')
+
             ts = d.get('timestamp')
-            if not ts or not isinstance(ts, (int, float)):
+            if ts and isinstance(ts, (int, float)):
+                day = time.strftime('%Y-%m-%d', time.localtime(ts / 1000))
+            else:
+                day = None
+
+            if d.get('type') == 'ai-title':
+                title = d.get('aiTitle') or title
+
+            acc = []
+            _walk_usage(d, acc)
+            u = _pick_usage(acc)
+            if not u:
                 continue
-            day = time.strftime('%Y-%m-%d', time.localtime(ts / 1000))
-            if t == 'ai-title':
-                title = d.get('aiTitle', title)
-            elif t == 'message':
-                role = d.get('role')
-                if role not in ('user', 'assistant'):
-                    continue
-                content = d.get('content', [])
-                text = ''
-                if isinstance(content, list):
-                    for c in content:
-                        if isinstance(c, dict) and 'text' in c:
-                            text += c['text']
-                elif isinstance(content, str):
-                    text = content
-                tokens = _estimate_tokens(text)
-                if day not in daily:
-                    daily[day] = 0
-                daily[day] += tokens
-            elif t == 'reasoning':
-                content = d.get('rawContent', [])
-                text = ''
-                if isinstance(content, list):
-                    for c in content:
-                        if isinstance(c, dict) and 'text' in c:
-                            text += c['text']
-                tokens = _estimate_tokens(text)
-                if day not in daily:
-                    daily[day] = 0
-                daily[day] += tokens
-    return daily, title
+
+            total = int(u.get('total_tokens') or 0)
+            inp = int(u.get('input_tokens') or u.get('prompt_tokens') or 0)
+            out = int(u.get('output_tokens') or u.get('completion_tokens') or 0)
+            if total == 0:
+                total = inp + out
+            if total == 0:
+                continue
+            cache_r = int(u.get('cache_read_input_tokens')
+                          or u.get('prompt_cache_hit_tokens') or 0)
+
+            # 去重：优先 providerData.messageId（同一次调用唯一），否则退回行 id+总量
+            pd = d.get('providerData') or {}
+            key = pd.get('messageId') or pd.get('requestId') or (d.get('id'), total)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            tot['total'] += total
+            tot['input'] += inp
+            tot['output'] += out
+            tot['cache_read'] += cache_r
+            tot['calls'] += 1
+
+            if day:
+                dd = daily.setdefault(day, {'total': 0, 'input': 0, 'output': 0,
+                                            'cache_read': 0, 'calls': 0})
+                dd['total'] += total
+                dd['input'] += inp
+                dd['output'] += out
+                dd['cache_read'] += cache_r
+                dd['calls'] += 1
+
+    return daily, title, tot
+
+
+def _session_meta():
+    """从 workbuddy.db 读会话元信息（标题/模型/时间/工作目录）。只读，失败则返回空。"""
+    meta = {}
+    if not os.path.exists(DBP):
+        return meta
+    con = ro_connect(DBP)
+    if not con:
+        return meta
+    try:
+        for sid, title, model, created, last, cwd in con.execute(
+                'select id, title, model, created_at, last_activity_at, cwd from sessions'):
+            meta[sid] = {'title': title, 'model': model, 'created_at': created,
+                         'last_activity_at': last, 'cwd': cwd}
+    except Exception:
+        pass
+    con.close()
+    return meta
+
 
 def scan(full, need, mark):
     out = []
     daily_rows = []
     daily_files = []
-    used_session_ids = set()
 
-    # 1. 先读 session_usage 表的老数据（有 credit_json 的真实花费）
-    if os.path.exists(DBP):
-        con = ro_connect(DBP)
-        if con:
-            try:
-                rows = con.execute(
-                    'select su.session_id, su.credit_json, s.title, s.model, s.created_at, s.last_activity_at, s.cwd '
-                    'from session_usage su left join sessions s on su.session_id = s.id'
-                ).fetchall()
-            except Exception:
-                rows = []
-            con.close()
-            for r in rows:
-                sid, credit, title, model, created, last, cwd = r
-                money = _money_of(credit)
-                if money <= 0:
-                    continue
-                est_tok = _tokens_of(money)
-                cost = round(money, 4)
-                ts = last or created
-                day = time.strftime('%Y-%m-%d', time.localtime(ts / 1000)) if ts else time.strftime('%Y-%m-%d')
-                ts_ms = int(ts) if ts else int(time.time() * 1000)
-                out.append({
-                    'agent': KEY, 'session_id': sid,
-                    'title': (title or '未命名会话')[:30],
-                    'cwd': cwd or '', 'model': model or '', 'provider': 'workbuddy',
-                    'created_at': created or 0, 'last_activity_at': last or 0,
-                    'input_tokens': est_tok, 'output_tokens': 0,
-                    'cache_read_tokens': 0, 'cache_write_tokens': 0,
-                    'total_tokens': est_tok, 'cost': cost, 'est': 0,
-                    'source_file': DBP,
-                })
-                daily_rows.append({
-                    # source_file 必须按会话唯一：daily 表主键是 (agent, day, source_file)，
-                    # 若同一数据源的多个会话共用 source_file，同一天会被互相覆盖。
-                    'agent': KEY, 'day': day, 'source_file': f'{DBP}#{sid}',
-                    'tokens': est_tok, 'est': 0,
-                })
-                used_session_ids.add(sid)
-            # 注册旧的整表 source_file，让引擎清掉历史遗留的旧格式 daily 行
-            # （旧版本曾用 source_file=DBP 导致同日多会话互相覆盖，这里做一次性迁移清理）。
-            # 新写入的行是 DBP#sid 格式，不会被这次删除命中。
-            daily_files.append(DBP)
-            mark(DBP, f'{os.stat(DBP).st_mtime_ns}:{os.stat(DBP).st_size}')
+    if not os.path.isdir(PROJECTS_ROOT):
+        return {'sessions': out, 'daily': daily_rows, 'daily_files': daily_files}
 
-    # 2. 再读 projects 下的 jsonl 文件，统计没有 credit_json 的会话
-    if os.path.isdir(PROJECTS_ROOT):
-        files = glob.glob(os.path.join(PROJECTS_ROOT, '*', '*.jsonl'))
-        for p in files:
-            # 从文件名提取 session id（文件名就是 session id）
-            sid = os.path.basename(p).replace('.jsonl', '')
-            if sid in used_session_ids:
-                continue  # 已经从 db 里读过了，不用再算
-            try:
-                st = os.stat(p)
-            except OSError:
-                continue
-            fp = f'{st.st_mtime_ns}:{st.st_size}'
-            if not need(full, p, fp):
-                continue
-            daily, title = _parse_jsonl_file(p)
-            for day, tokens in daily.items():
-                if tokens < 100:
-                    continue
-                ts_ms = int(time.mktime(time.strptime(day, '%Y-%m-%d')) * 1000)
-                short_id = sid[:8]
-                out.append({
-                    'agent': KEY, 'session_id': f'workbuddy-{day}-{short_id}',
-                    'title': f'{title[:30]} {day}',
-                    'cwd': '', 'model': 'workbuddy', 'provider': 'workbuddy',
-                    'created_at': ts_ms, 'last_activity_at': ts_ms,
-                    'input_tokens': 0, 'output_tokens': 0,
-                    'cache_read_tokens': 0, 'cache_write_tokens': 0,
-                    'total_tokens': tokens, 'cost': None, 'est': 1,
-                    'source_file': p,
-                })
-                daily_rows.append({
-                    'agent': KEY, 'day': day, 'source_file': p,
-                    'tokens': tokens, 'est': 1,
-                })
-            daily_files.append(p)
+    meta = _session_meta()
+    files = glob.glob(os.path.join(PROJECTS_ROOT, '*', '*.jsonl'))
+
+    for p in files:
+        sid = os.path.basename(p).replace('.jsonl', '')
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        fp = f'{st.st_mtime_ns}:{st.st_size}'
+        if not need(full, p, fp):
+            continue
+
+        daily, title, tot = _parse_jsonl_file(p)
+        if tot['total'] <= 0:
             mark(p, fp)
+            continue
+
+        m = meta.get(sid) or {}
+        sess_title = (m.get('title') or title or '未命名会话')
+        created = m.get('created_at') or 0
+        last = m.get('last_activity_at') or 0
+
+        # 会话级汇总行：真实 token（est=0）
+        out.append({
+            'agent': KEY, 'session_id': sid,
+            'title': str(sess_title)[:60],
+            'cwd': m.get('cwd') or '', 'model': m.get('model') or '',
+            'provider': 'workbuddy',
+            'created_at': created, 'last_activity_at': last,
+            'input_tokens': tot['input'], 'output_tokens': tot['output'],
+            'cache_read_tokens': tot['cache_read'], 'cache_write_tokens': 0,
+            'total_tokens': tot['total'], 'cost': None, 'est': 0,
+            'source_file': p,
+        })
+
+        # 按天行：source_file 用 会话级唯一路径（jsonl 本身天然唯一）
+        for day, dd in daily.items():
+            if dd['total'] <= 0:
+                continue
+            daily_rows.append({
+                'agent': KEY, 'day': day, 'source_file': p,
+                'tokens': dd['total'], 'est': 0,
+            })
+
+        daily_files.append(p)
+        mark(p, fp)
 
     return {'sessions': out, 'daily': daily_rows, 'daily_files': daily_files}

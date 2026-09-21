@@ -31,13 +31,26 @@ agent-usage.exe [--port 8765] [--no-open] [--interval 5] [--full]
 | --- | --- | --- | --- |
 | Codex / Claude | 精确 | CC Switch `proxy_request_logs` | 代理层记录每次请求的 input/output/cache tokens |
 | Kimi Code | 精确 | `~/.kimi/sessions/**/wire.jsonl` | 本地 wire 协议含 token_usage |
-| WorkBuddy | 混合 | `~/.workbuddy/workbuddy.db` + `~/.workbuddy/projects/**/*.jsonl` | 老会话读 `session_usage.credit_json` 真实花费（¥2/百万 tokens 折算）；新版本不再写 credit_json，其会话改从 jsonl 文本估算 |
+| WorkBuddy | 精确 | `~/.workbuddy/projects/**/*.jsonl` | 每轮模型调用带 `usage`（prompt/completion/total_tokens），逐轮累加即真实计费量 |
 | CodeBuddy | 估算 | `~/.codebuddy/projects/**/*.jsonl` | 文本长度估算 |
 | 豆包工作 | 四层校准 | timeline API → Local Storage → IndexedDB → trajectory | 云端应用，四层数据源降级 |
 | 千问工作 | 估算 | `~/.qwenworkcn/projects/**/*.jsonl` | jsonl 无 usage 字段，文本长度估算 |
 | ZCode | 精确 | `~/.zcode/cli/db/db.sqlite` | 本地 SQLite 用量记录 |
 
 > 标"估算"的 Agent 本地没有精确 token 用量，按文本长度或费用折算，仅供参考。
+
+### WorkBuddy 口径说明（踩坑记录）
+
+WorkBuddy 的 jsonl 每轮调用都带真实 `usage`，但有两个坑：
+
+1. **同一行内会出现两个 usage 字典**（原始 API 返回 + 规范化版本，字段分别是
+   `prompt_tokens/completion_tokens` 与 `input_tokens/output_tokens`），
+   它们描述同一次调用，**只能取一个**，否则总量恰好翻倍（实测 raw/nodedup = 2.00）。
+2. `prompt_tokens` 每轮携带完整历史（实测前 60 轮 57 次单调递增），
+   所以**逐轮累加 `total_tokens` 就是真实计费量**，无需换算。
+
+不要用 `session_usage.credit_json` 折算 token：那是**费用**字段（元），
+与 token 的比值随模型费率浮动（实测 0.31x ~ 12.43x），且约 65% 的会话该字段为 NULL。
 
 ## 豆包工作插件详细说明
 
