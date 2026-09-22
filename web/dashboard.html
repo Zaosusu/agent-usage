@@ -40,6 +40,14 @@ header{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:6px 0 18p
 .kpi .val{font-family:var(--mono);font-size:22px;font-weight:600;margin-top:4px;font-variant-numeric:tabular-nums}
 .kpi .sub{font-size:12px;color:var(--ink-3);margin-top:2px}
 .kpi .val.est{color:var(--warn)}
+/* 增量提示：绝对值被大分母稀释后，用「近 N 分钟 +X」让人一眼看出系统还活着 */
+.delta{font-size:12px;margin-top:3px;font-variant-numeric:tabular-nums}
+.delta.up{color:var(--ok)}
+.delta.flat{color:var(--ink-3)}
+.delta b{font-family:var(--mono);font-weight:600}
+/* agent 活跃度：超过阈值没更新就标记出来 */
+.agent-chip .stale{font-size:10px;color:var(--warn);background:var(--warn-bg);border:1px solid #F2DFC4;border-radius:999px;padding:0 5px;align-self:center}
+.agent-chip .idle{font-size:10px;color:var(--ink-3);background:var(--line-2);border-radius:999px;padding:0 5px;align-self:center}
 /* agent strip */
 .agents{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}
 .agent-chip{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;cursor:pointer;display:flex;align-items:baseline;gap:8px;transition:border-color .12s, box-shadow .12s}
@@ -243,6 +251,62 @@ let serving = true;
 let chartsReady = false;
 const $ = id => document.getElementById(id);
 
+/* ---------- 增量追踪 ----------
+   总量是 185 亿量级的绝对值，而每分钟增量约 0.0017%，两位小数显示看不出来。
+   这里保留一个「刷新快照队列」，用近 N 分钟的差值告诉用户系统是否还活着。
+   快照只存内存 + sessionStorage（刷新页面不清零），不写后端。 */
+const SNAP_KEY = 'agentUsage.snapshots';
+const SNAP_WINDOW_MS = 10 * 60 * 1000;   // 统计窗口：近 10 分钟
+let snapshots = loadSnapshots();
+
+function loadSnapshots(){
+  try {
+    const raw = sessionStorage.getItem(SNAP_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.filter(s => s && typeof s.t === 'number') : [];
+  } catch(_){ return []; }
+}
+function saveSnapshots(){
+  try { sessionStorage.setItem(SNAP_KEY, JSON.stringify(snapshots.slice(-40))); } catch(_){}
+}
+/** 把当前总量压入快照队列，返回 {delta, minutes, hasPrev}
+    关键：按「时间间隔」记录，而不是只在总量变化时记录 ——
+    否则总量完全冻结时队列永远只有 1 个点，会卡在「开始追踪增量…」，
+    用户看到的反而是「可能挂了」，正是这个提示要解决的问题。 */
+const SNAP_MIN_GAP_MS = 60 * 1000;       // 至少每 60 秒记一个点，保证基线随时间推进
+function pushSnapshot(total){
+  const now = Date.now();
+  const last = snapshots[snapshots.length-1];
+  if (!last) {
+    snapshots.push({t: now, total: total});
+  } else if (now - last.t >= SNAP_MIN_GAP_MS) {
+    snapshots.push({t: now, total: total});            // 到点了就记，不管值变没变
+  } else if (last.total !== total) {
+    last.t = now; last.total = total;                  // 间隔内数值变了，就地刷新
+  }
+  // 丢掉窗口外的旧点，但至少保留一个窗口外的点作为基线
+  const cutoff = now - SNAP_WINDOW_MS;
+  while (snapshots.length > 2 && snapshots[0].t < cutoff && snapshots[1].t < cutoff) snapshots.shift();
+  saveSnapshots();
+  return computeDelta(total, now);
+}
+/** 用窗口内最早的一个点做基线算增量；没有基线就返回 hasPrev=false */
+function computeDelta(total, now){
+  const cutoff = now - SNAP_WINDOW_MS;
+  let base = null;
+  for (const s of snapshots){ if (s.t <= cutoff) base = s; else break; }
+  if (!base) base = snapshots.length > 1 ? snapshots[0] : null;
+  if (!base || base.total === total) {
+    return {delta: 0, minutes: base ? Math.round((now - base.t)/60000) : 0, hasPrev: !!base};
+  }
+  return {
+    delta: total - base.total,
+    minutes: Math.max(1, Math.round((now - base.t)/60000)),
+    hasPrev: true,
+  };
+}
+
 let dailyChart = null, agentChart = null, modelChart = null, projectChart = null;
 function initCharts(){
   if (!window.echarts || dailyChart) return dailyChart != null;
@@ -304,10 +368,22 @@ function renderKpis(){
   const todayAgents = (data.agents||[]).filter(a=>filterAgent? a.key===filterAgent : a.total_tokens>0);
   todayAgents.forEach(a => { todayTotal += (today[a.key]||0); });
   const estAgents = agents.filter(a=>a.est).map(a=>a.name);
+  // 增量：绝对值被大分母稀释，用「近 N 分钟 +X」让用户一眼看出在动
+  const d = pushSnapshot(t.total_tokens||0);
+  let deltaHtml;
+  if (!d.hasPrev) {
+    deltaHtml = '<div class="delta flat">开始追踪增量…</div>';
+  } else if (d.delta > 0) {
+    const pct = (d.delta / Math.max(1, (t.total_tokens||0) - d.delta)) * 100;
+    deltaHtml = `<div class="delta up">近 ${d.minutes} 分钟 <b>+${fmt(d.delta)}</b>（+${pct.toFixed(3)}%）</div>`;
+  } else {
+    deltaHtml = `<div class="delta flat">近 ${d.minutes} 分钟 <b>+0</b> · 无新增</div>`;
+  }
   const html = `
     <div class="kpi"><div class="lab">总 token 用量</div>
       <div class="val">${fmt(t.total_tokens||0)}</div>
-      <div class="sub">${fmtRaw(t.total_tokens||0)} tokens · 真实${fmt(t.real_tokens||0)} + 估算${fmt(t.est_tokens||0)}</div></div>
+      <div class="sub">${fmtRaw(t.total_tokens||0)} tokens · 真实${fmt(t.real_tokens||0)} + 估算${fmt(t.est_tokens||0)}</div>
+      ${deltaHtml}</div>
     <div class="kpi"><div class="lab">其中：估算类（豆包/千问等）</div>
       <div class="val est">${fmt(t.est_tokens||0)}</div>
       <div class="sub">${fmtRaw(t.est_tokens||0)} tokens · 非精确计数</div></div>
@@ -323,16 +399,38 @@ function renderKpis(){
 
 
 /* ---------- agent chips ---------- */
+/** 每个 agent 最后活动时间（从 sessions 里取 max last_activity_at） */
+function lastActivityByAgent(){
+  const m = {};
+  (data.sessions||[]).forEach(s => {
+    const k = s.agent, ts = s.last_activity_at || 0;
+    if (!m[k] || ts > m[k]) m[k] = ts;
+  });
+  return m;
+}
+/** 活跃度标记：≤24h 绿点；1~7 天显示「N天前」；>7 天显示「N天前」并加重 */
+function activityTag(lastMs){
+  if (!lastMs) return '';
+  const hours = (Date.now() - lastMs) / 3600000;
+  if (hours <= 24) return '';                       // 今天活跃，不加标记
+  const days = Math.floor(hours / 24);
+  const label = days >= 1 ? `${days}天前` : `${Math.floor(hours)}小时前`;
+  return days >= 7
+    ? `<span class="stale" title="超过 ${days} 天没有新数据">${label}</span>`
+    : `<span class="idle" title="${days} 天没有新数据">${label}</span>`;
+}
 function renderChips(){
   const agents = data.agents || [];
+  const lastAct = lastActivityByAgent();
   const chips = agents.map(a => {
     const active = filterAgent === a.key ? 'active' : '';
     const badge = a.est ? '<span class="badge">估算</span>' : '';
+    const act = activityTag(lastAct[a.key]);
     return `<div class="agent-chip ${active}" data-agent="${a.key}">
       <span class="sw" style="background:${colorOf(a.key)}"></span>
       <span class="nm">${a.name}</span>
       <span class="tk">${fmt(a.total_tokens)}</span>
-      ${badge}
+      ${badge}${act}
     </div>`;
   }).join('');
   $('agentChips').innerHTML = chips;
@@ -347,7 +445,7 @@ function renderChips(){
 
 /* ---------- daily stacked ---------- */
 function renderDaily(){
-  if (!dailyChart) return;
+  if (!dailyChart || !data) return;
   const days = (data.days||[]);
   const n = range === 'all' ? days.length : Math.min(parseInt(range,10), days.length);
   const slice = days.slice(-n);
@@ -389,7 +487,7 @@ function renderDaily(){
 
 /* ---------- agent totals ---------- */
 function renderAgents(){
-  if (!agentChart) return;
+  if (!agentChart || !data) return;
   const agents = data.agents||[];
   const names = agents.map(a=>a.name);
   const yMax = Math.max(1, ...agents.map(a=>a.total_tokens));
@@ -423,7 +521,7 @@ function renderAgents(){
 
 /* ---------- project grouping ---------- */
 function renderProjects(){
-  if (!projectChart) return;
+  if (!projectChart || !data) return;
   const sessions = (data.sessions||[]);
   const projMap = {};
   sessions.forEach(s => {
@@ -463,7 +561,7 @@ function renderProjects(){
 
 /* ---------- model top ---------- */
 function renderModels(){
-  if (!modelChart) return;
+  if (!modelChart || !data) return;
   const models = (data.models||[]).slice(0,15).reverse();
   const series = [{
     type:'bar', barWidth:12,
@@ -492,6 +590,7 @@ const PAGE_SIZE = 10;
 let currentPage = 1;
 
 function getFilteredSessions(){
+  if (!data) return [];
   const agents = data.agents||[];
   const filterSel = $('agentFilter');
   if (filterSel.options.length <= 1){
@@ -552,6 +651,7 @@ function gotoPage(p){ currentPage = p; renderTable(); }
 
 /* ---------- coverage note ---------- */
 function renderCoverage(){
+  if (!data) return;
   const cov = data.coverage||[];
   const notes = cov.map(c => {
     if (c.status==='empty') return `<code>${c.name}</code>：${c.note}`;
