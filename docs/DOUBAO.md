@@ -19,6 +19,7 @@
 - [已知偏差：推理 token 本地不可见](#已知偏差推理thinkingtoken-本地不可见)
 - [建模陷阱（改算法前必读）](#建模陷阱改算法前必读)
 - [一键复现](#一键复现)
+- [已知问题](#已知问题)
 - [如何进一步钉死](#如何进一步钉死)
 - [可选 cookie 配置](#可选-cookie-配置)
 
@@ -29,12 +30,48 @@
 | 层级 | 数据源 | 精确度 | 触发条件 | 降级策略 |
 |---|---|---|---|---|
 | 1 | timeline API | 最精确 | 配置了 cookie | 失败→降级到本地 |
-| 2 | Local Storage 百分比 | 精确 | 找到 usedThisPeriod 字段 | 失败→降级到文本 |
+| 2 | Local Storage 百分比 | ⚠️ **口径不同，见下** | 找到 usedThisPeriod 字段 | 失败→降级到文本 |
 | 3 | IndexedDB 逐次 token | 参考值 | 扫到逐次调用的 input/output token | **仅供人工核对**，不参与日常计算（时间戳是落盘时刻，不可做时间窗对齐） |
 | 4 | trajectory 文本估算 | 最粗 | 兜底方案 | 任何情况都能跑 |
 
 > 系数校准走的是**消息级对齐**（见下节），既不依赖第 3 层的时间戳，
 > 也不受第 4 层「只扫 agent 模式」的限制。
+
+### ⚠️ 第 2 层（Local Storage）不是同一个额度池
+
+2026-09-22 实测：第 2 层读到的 `usedThisPeriod / monthlyLimit` = **566 / 20000 = 2.83%**，
+而第 1 层 timeline 同一时刻是 **499.20%**，**差 176 倍**。
+
+本地字段暴露了原因——那是**另一个池子**：
+
+```json
+{"type":"model","plan":"premium","monthlyLimit":20000,"billingMode":"metered",
+ "durationDays":114,"quotaPeriodStartedAt":"2026-07-09T14:04:57Z",
+ "quotaPeriodEndsAt":"2026-10-31T14:04:00Z",
+ "usedThisPeriod":566,"remainingThisPeriod":19434}
+```
+
+| | 第 1 层 timeline | 第 2 层 Local Storage |
+|---|---|---|
+| 分母 | 7 天滚动 token 额度 | `monthlyLimit: 20000`（按次/点数，周期 7/9→10/31） |
+| 当前值 | 499.20% | 2.83% |
+| × 50 万 换算 | 2.50 亿 | **1.4 万**（差 17000 倍） |
+
+⇒ **cookie 失效降级到第 2 层时，豆包用量会塌成近乎 0。** 第 2 层的百分比
+**不能**套用 50 万系数（那是为第 1 层校准的）。修法见文末「已知问题」。
+
+### 其余本地途径：实测清单（2026-09-22 全扫）
+
+| 途径 | 结论 |
+|---|---|
+| `sdk_storage/log/netmain-*.alaudalog`（每日 40~60MB 网络日志） | **加密二进制**，`token`/`usage`/`http` 关键词零命中 ⇒ 不可读 |
+| `Tea/tea.db`（字节埋点库） | 只有网络质量（`dns_dur_ms`/`connection_dur_ms`）与安装事件，**无 token** |
+| `saman_shell_db_storage` | 空库（0 字节 log） |
+| `WebStorage/*/CacheStorage` | 静态资源缓存，无用量数据 |
+| `IndexedDB` 原始记录 | 记录体**被压缩**（带 `compressedAt` 字段）；`inputTokens` 有 62 处但 `outputTokens` 仅 1 处 ⇒ **输出侧几乎不落盘**，这也解释了它为什么只能当参考值 |
+| `trajectory.jsonl` 结构化字段 | 递归统计 **7403 行**，顶层字段**只有 5 个**：`role`(7403) / `content`(6174) / `tool_call_id`(3043) / `tool_calls`(2739) / `image_link_list`(335)。**含 `usage`/`inputTokens` 的行数 = 0** ⇒ 确认无 token 账本（此前在 tool 消息 `content` 里搜到过 `usage` 字样，是 agent 读文件时打进来的文本，**假阳性**） |
+
+⇒ **本地不存在可用的绝对 token 账本。** 百分比路线（第 1 层）仍是唯一正解。
 
 ---
 
@@ -285,6 +322,38 @@ python tools/calibrate_doubao.py --apply         # 写回 plugins/doubao.py
 python tools/calibrate_doubao.py --anchor 1.5e8  # 有绝对配额时一击钉死
 python tools/calibrate_doubao.py --root "D:/xx/DoubaoWork/User Data/Default"   # 换机器
 ```
+
+## 已知问题
+
+### 第 2 层降级会把用量算错 17000 倍（待修）
+
+`plugins/doubao.py:343-347` 当前实现：
+
+```python
+elif quota:
+    pct, used, limit = quota
+    total_est = int(pct * 100 * TOKENS_PER_PCT)   # ⚠️ 这里
+    source = 'local-quota'
+```
+
+`quota` 来自 Local Storage 的 `usedThisPeriod/monthlyLimit`，是**另一个额度池**
+（2.83%，见上文「第 2 层不是同一个额度池」），**不能**乘 `TOKENS_PER_PCT`。
+
+**后果**：cookie 一旦失效（过期/换机器/未配置），豆包用量从 **2.50 亿 → 1.4 万**，
+看板上等于消失。
+
+**建议修法**（三选一，尚未实施）：
+
+| 方案 | 行为 | 取舍 |
+|---|---|---|
+| A. 降级到第 4 层 | cookie 失效时用 trajectory 文本估算（≈170 万，量级对但偏粗） | **推荐**：量级正确、来源诚实 |
+| B. 只报不换算 | 显示 `used/limit` 原值（如 `566/20000`）并标记"非 token" | 信息完整，但看板单位不统一 |
+| C. 反推该池系数 | 待采集足够样本后再定 | 需长期数据，短期无解 |
+
+**判据**：该池单位不明（`type:model` / `billingMode:metered`，疑似按次或点数），
+在拿到明确单位前，**任何乘以 token 系数的做法都是错的**。
+
+---
 
 ## 如何进一步钉死
 
