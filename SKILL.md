@@ -102,6 +102,12 @@ curl -s -o /dev/null -w "HTTP %{http_code}" --max-time 8 "http://127.0.0.1:8765/
 
 - 所有数据本地存储，不上传
 - 标 `estimate=1` 的是估算值，不是精确 token 数
+- ⚠️ **跨 agent 的 token 数不可横向比较**：WorkBuddy / Codex / Kimi 记的是**原始传输量**
+  （每轮把整段上下文重发一遍的累计，input 占 99%+、output 不足 1%），
+  豆包 / 千问记的是**折后计价量换算**（缓存命中的重复上下文近乎免费）。
+  同一段工作实际在两边能差 5~8 倍。回答「哪个 AI 用最多」时，
+  只能表述为**同一口径内的排序**，必须一并提示量纲差异，否则会得出误导结论。
+  实测样本见 README「⚠️ 跨工具的口径陷阱」一节。
 - 豆包工作插件支持可选 cookie 配置（`~/.doubao-usage/config.json`，键 `doubao_cookie`）：
   配了就拉 timeline API 拿**真实百分比**，没配就本地估算兜底。
   但**注意**：即使配了 cookie，API 也只返回**百分比**（如 `0.15%`），
