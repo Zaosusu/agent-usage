@@ -10,9 +10,20 @@
 其余一切都是为论证这个系数服务的，推导与证据链见 docs/DOUBAO.md
 （可一键复现：python tools/calibrate_doubao.py）。
 
-数据来源（优先级从高到低）：
-1. timeline API 百分比（最精确）：Cookie 认证，拉全部记录累加
-2. trajectory 文本估算（兜底，按日期分布）：扫 .sessions 目录，按天拆分
+【数据来源】只有一条：timeline API 百分比（Cookie 认证，拉全部记录累加）。
+拿不到就**直接抛错**，绝不静默降级 —— 理由见下。
+
+【为什么不做降级】本地任何途径都拿不到与 timeline 同一额度池的数字：
+- Local Storage 的 usedThisPeriod/monthlyLimit 是**另一个额度池**
+  （plan:premium / billingMode:metered，周期约 4 个月），实测 2.83% vs
+  timeline 499.20%，差 176 倍。乘系数得 141.5 万，而正确量级 2.50 亿。
+  它曾作为降级分支存在，导致 cookie 失效时用量**静默暴跌 176 倍**；
+  2026-09-22 连同分支一起移除，并把降级改为报错。
+- trajectory.jsonl 只有 5 个顶层字段（role/content/tool_call_id/tool_calls/
+  image_link_list），**没有任何 usage 字段**；按文本估算与真实用量无稳定关系
+  （同一个 1% 随任务长度浮动 7.7 倍）。
+- IndexedDB / .alaudalog 里的 inputTokens 零散，且无法证明同额度池。
+给一个会被误读成"真实用量"的数，比明确失败更糟。
 
 【两条边界，读数前必读】
 - **只对账户总量成立**：1% 不是固定 token 数，按任务长度浮动 7.7 倍
@@ -30,8 +41,7 @@
 【钉死精确值】拿到「一个 7 天窗口 = 多少 token」的绝对数即可一击锁死：
     python tools/calibrate_doubao.py --anchor 1.5e8 --apply
 """
-import os, re, json, time, urllib.request
-from engine.common import collect_strings, estimate_tokens
+import os, json, time, urllib.request
 
 KEY = 'doubao'
 NAME = '豆包工作'
@@ -40,6 +50,8 @@ WATCH_PATHS = ['%USERPROFILE%\\AppData\\Local\\DoubaoWork\\User Data\\Default']
 
 # 固定系数：1% = 50 万 token（仅对「账户总量」成立，边界见模块 docstring）
 TOKENS_PER_PCT = 500_000
+
+_CONFIG_PATH = os.path.expanduser("~/.doubao-usage/config.json")
 
 _DEFAULT_ROOT = os.path.expanduser(WATCH_PATHS[0].replace('%USERPROFILE%', os.path.expanduser('~')))
 
@@ -108,52 +120,11 @@ def _fetch_timeline(cookie_str):
     return all_pct, count, daily
 
 
-def _fetch_timeline_entries(cookie_str):
-    """拉 timeline 逐条 [(display_name, pct)]。
-
-    仅供 tools/calibrate_doubao.py 的“算法 F”使用：把每条用量按用户消息文本
-    与本地 trajectory 的 turn 一一对上，做 Σtok/Σ% 聚合反推。
-    与 _fetch_timeline 共用同一套请求参数，避免逻辑漂移。
-    """
-    if not cookie_str:
-        return []
-    headers = _timeline_headers(cookie_str)
-    out = []
-    cursor = None
-    try:
-        for _ in range(200):
-            body = json.dumps({"cursor": cursor} if cursor else {}).encode()
-            req = urllib.request.Request(_TIMELINE_URL, data=body,
-                                         headers=headers, method="POST")
-            d = json.loads(urllib.request.urlopen(req, timeout=15).read()).get("data", {})
-            entries = d.get("entries", [])
-            if not entries:
-                break
-            for e in entries:
-                u = e.get("usage", {})
-                pct_str = u.get("quota_source", {}).get("display_text", "0%")
-                if "<" in pct_str:
-                    pct = 0.005
-                else:
-                    try:
-                        pct = float(pct_str.replace("%", ""))
-                    except ValueError:
-                        pct = 0.0
-                out.append((u.get("display_name") or "", pct))
-            cursor = d.get("next_cursor")
-            if not d.get("has_more") or not cursor:
-                break
-    except Exception:
-        return out
-    return out
-
-
 def _extract_cookie():
-    config_path = os.path.expanduser("~/.doubao-usage/config.json")
-    if not os.path.isfile(config_path):
+    if not os.path.isfile(_CONFIG_PATH):
         return None
     try:
-        with open(config_path, 'r') as f:
+        with open(_CONFIG_PATH, 'r') as f:
             config = json.load(f)
         cookie = config.get("doubao_cookie", "")
         return cookie if cookie else None
@@ -161,82 +132,13 @@ def _extract_cookie():
         return None
 
 
-def _scan_indexeddb():
-    idb_dir = os.path.join(_DEFAULT_ROOT, 'IndexedDB')
-    total_in = 0
-    total_out = 0
-    if not os.path.isdir(idb_dir):
-        return 0, 0
-    for sub in os.listdir(idb_dir):
-        ldb_dir = os.path.join(idb_dir, sub)
-        if not os.path.isdir(ldb_dir):
-            continue
-        for fn in os.listdir(ldb_dir):
-            if not (fn.endswith('.ldb') or fn.endswith('.log')):
-                continue
-            fp = os.path.join(ldb_dir, fn)
-            try:
-                with open(fp, 'rb') as f:
-                    data = f.read()
-            except Exception:
-                continue
-            for kw, arr in [(b'inputTokensI', 'in'), (b'outputTokensI', 'out')]:
-                idx = 0
-                while True:
-                    idx = data.find(kw, idx)
-                    if idx < 0:
-                        break
-                    pos = idx + len(kw)
-                    val = 0
-                    shift = 0
-                    while pos < len(data):
-                        b = data[pos]
-                        pos += 1
-                        val |= (b & 0x7f) << shift
-                        if not (b & 0x80):
-                            break
-                        shift += 7
-                    if 0 < val < 500_000_000:
-                        if arr == 'in':
-                            total_in += val
-                        else:
-                            total_out += val
-                    idx = pos
-    return total_in, total_out
-
-
-def _scan_trajectory_daily():
-    """扫 trajectory.jsonl，按日期分组返回 {date_str: token_estimate}。"""
-    sess_root = os.path.join(_DEFAULT_ROOT, '.doubaowork', 'agent_mode',
-                             'workspace', '.sessions')
-    daily = {}
-    if not os.path.isdir(sess_root):
-        return daily
-    for root, dirs, files in os.walk(sess_root):
-        for f in files:
-            if f != 'trajectory.jsonl':
-                continue
-            fp = os.path.join(root, f)
-            try:
-                mtime = os.path.getmtime(fp)
-                day_str = time.strftime('%Y-%m-%d', time.localtime(mtime))
-                with open(fp, 'r', encoding='utf-8', errors='replace') as fh:
-                    texts = []
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            obj = json.loads(line)
-                            collect_strings(obj, texts, 50000)
-                        except Exception:
-                            texts.append(line)
-                    tok = estimate_tokens('\n'.join(texts))
-                if tok > 0:
-                    daily[day_str] = daily.get(day_str, 0) + tok
-            except Exception:
-                pass
-    return daily
+def _cookie_hint():
+    """报错文案：cookie 缺失/失效时告诉用户下一步怎么做。"""
+    if not os.path.isfile(_CONFIG_PATH):
+        return (f"未配置 cookie：请把浏览器里 doubao.com 的 Cookie 写入 {_CONFIG_PATH}\n"
+                f'    格式：{{"doubao_cookie": "你的cookie字符串"}}')
+    return (f"cookie 已配置（{_CONFIG_PATH}）但拿不到 timeline 数据，"
+            f"多半已过期：请重新登录 doubao.com 复制 Cookie 覆盖该文件")
 
 
 def _wrap_result(sessions, daily_map, source):
@@ -256,114 +158,49 @@ def _wrap_result(sessions, daily_map, source):
 
 
 def scan(full, need, mark):
+    """只认 timeline API。拿不到就抛错，不降级、不估算。"""
     cookie = _extract_cookie()
+    if not cookie:
+        raise RuntimeError(f'豆包用量取不到：{_cookie_hint()}')
+
     api_pct, api_count, api_daily = _fetch_timeline(cookie)
-    idx_in, idx_out = _scan_indexeddb()
-    daily_traj = _scan_trajectory_daily()
+    if not api_pct or api_pct <= 0:
+        raise RuntimeError(f'豆包用量取不到：{_cookie_hint()}')
 
-    if api_pct and api_pct > 0 and api_daily:
-        total_est = int(api_pct * TOKENS_PER_PCT)
-        source = f'timeline-api ({api_count}条, {api_pct:.1f}%)'
-        # 用 API 返回的按日期分组的用量
-        daily_pct = api_daily
-    else:
-        # cookie 缺失/失效 ⇒ 直接用 trajectory 文本估算兜底。
-        #
-        # ⚠️ 不要在这里插入 Local Storage 的 usedThisPeriod/monthlyLimit：
-        #    那是**另一个额度池**（plan:premium / billingMode:metered，周期约 4 个月，
-        #    单位疑似按次或点数），实测 2.83% vs timeline 499.20% —— 差 176 倍。
-        #    乘 TOKENS_PER_PCT 会得出 141.5 万（正确量级 2.50 亿），低估 176 倍。
-        #    2026-09-22 移除该分支（曾是 `elif quota:`，会导致降级时用量暴跌）。
-        total_est = sum(daily_traj.values())
-        source = 'trajectory-estimate'
-        daily_pct = None
-
-    if total_est == 0 and idx_in + idx_out == 0:
-        return []
-
+    source = f'timeline-api ({api_count}条, {api_pct:.1f}%)'
     daily_map = {}   # day -> tokens，供 daily 表使用
+    sessions = []
+    today_str = time.strftime('%Y-%m-%d')
+    for day, pct in sorted((api_daily or {}).items()):
+        if day > today_str:
+            continue
+        day_tokens = int(pct * TOKENS_PER_PCT)
+        if day_tokens < 1000:
+            continue
+        daily_map[day] = day_tokens
+        ts_ms = int(time.mktime(time.strptime(day, '%Y-%m-%d')) * 1000)
+        sessions.append({
+            'agent': KEY,
+            'session_id': f'doubao-{day}',
+            'title': f'豆包工作 {day}',
+            'cwd': '',
+            'model': 'doubao-seed',
+            'provider': 'bytedance',
+            'created_at': ts_ms,
+            'last_activity_at': ts_ms,
+            'input_tokens': 0,
+            'output_tokens': 0,
+            'cache_read_tokens': 0,
+            'cache_write_tokens': 0,
+            'total_tokens': day_tokens,
+            'cost': None,
+            'est': 1,
+            'source_file': source,
+        })
 
-    # 优先用 API 的按日期数据
-    if daily_pct and total_est > 0:
-        sessions = []
-        today_str = time.strftime('%Y-%m-%d')
-        for day, pct in sorted(daily_pct.items()):
-            if day > today_str:
-                continue
-            day_tokens = int(pct * TOKENS_PER_PCT)
-            if day_tokens < 1000:
-                continue
-            daily_map[day] = day_tokens
-            ts_ms = int(time.mktime(time.strptime(day, '%Y-%m-%d')) * 1000)
-            sessions.append({
-                'agent': KEY,
-                'session_id': f'doubao-{day}',
-                'title': f'豆包工作 {day}',
-                'cwd': '',
-                'model': 'doubao-seed',
-                'provider': 'bytedance',
-                'created_at': ts_ms,
-                'last_activity_at': ts_ms,
-                'input_tokens': 0,
-                'output_tokens': 0,
-                'cache_read_tokens': 0,
-                'cache_write_tokens': 0,
-                'total_tokens': day_tokens,
-                'cost': None,
-                'est': 1,
-                'source_file': source,
-            })
-        return _wrap_result(sessions, daily_map, source)
+    if not sessions:
+        # 有百分比但没有任何一天 ≥1000 token ⇒ 数据异常，宁可报错也不写脏数据
+        raise RuntimeError(f'豆包 timeline 返回 {api_pct:.2f}%（{api_count} 条）'
+                           f'但按日拆不出任何用量，数据异常，已跳过')
 
-    # 兜底：按 trajectory 日期分布拆分
-    if daily_traj and total_est > 0:
-        traj_total = sum(daily_traj.values())
-        if traj_total > 0:
-            sessions = []
-            today_str = time.strftime('%Y-%m-%d')
-            for day, traj_tok in sorted(daily_traj.items()):
-                if day > today_str:
-                    continue
-                day_tokens = int(total_est * traj_tok / traj_total)
-                if day_tokens < 1000:
-                    continue
-                daily_map[day] = day_tokens
-                ts_ms = int(time.mktime(time.strptime(day, '%Y-%m-%d')) * 1000)
-                sessions.append({
-                    'agent': KEY,
-                    'session_id': f'doubao-{day}',
-                    'title': f'豆包工作 {day}',
-                    'cwd': '',
-                    'model': 'doubao-seed',
-                    'provider': 'bytedance',
-                    'created_at': ts_ms,
-                    'last_activity_at': ts_ms,
-                    'input_tokens': 0,
-                    'output_tokens': 0,
-                    'cache_read_tokens': 0,
-                    'cache_write_tokens': 0,
-                    'total_tokens': day_tokens,
-                    'cost': None,
-                    'est': 1,
-                    'source_file': source,
-                })
-            return _wrap_result(sessions, daily_map, source)
-
-    return _wrap_result([{
-        'agent': KEY,
-        'session_id': 'doubao-local',
-        'title': f'豆包工作（{source}）',
-        'cwd': '',
-        'model': 'doubao-seed',
-        'provider': 'bytedance',
-        'created_at': int(time.time()*1000),
-        'last_activity_at': int(time.time()*1000),
-        'input_tokens': idx_in,
-        'output_tokens': idx_out,
-        'cache_read_tokens': 0,
-        'cache_write_tokens': 0,
-        'total_tokens': max(total_est, idx_in + idx_out),
-        'cost': None,
-        'est': 1,
-        'source_file': source,
-    }], daily_map, source)
+    return _wrap_result(sessions, daily_map, source)

@@ -34,7 +34,7 @@ agent-usage.exe [--port 8765] [--no-open] [--interval 5] [--full]
 | Kimi Code | 精确 | `~/.kimi/sessions/**/wire.jsonl` | 本地 wire 协议含 token_usage |
 | WorkBuddy | 精确 | `~/.workbuddy/projects/**/*.jsonl` | 每轮模型调用带 `usage`（prompt/completion/total_tokens），逐轮累加即真实计费量 |
 | CodeBuddy | 估算 | `~/.codebuddy/projects/**/*.jsonl` | 文本长度估算 |
-| 豆包工作 | 四层校准 | timeline API → Local Storage → IndexedDB 参考 → trajectory | 云端应用；系数由**消息级对齐**实测（见 [`docs/DOUBAO.md`](docs/DOUBAO.md)） |
+| 豆包工作 | 云端校准 | timeline API 百分比 × 固定系数 | 云端应用只给百分比；系数由**消息级对齐**实测（见 [`docs/DOUBAO.md`](docs/DOUBAO.md)） |
 | 千问工作 | 估算 | `~/.qwenworkcn/projects/**/*.jsonl` | jsonl 无 usage 字段，文本长度估算 |
 | ZCode | 精确 | `~/.zcode/cli/db/db.sqlite` | 本地 SQLite 用量记录 |
 
@@ -59,10 +59,11 @@ WorkBuddy 的 jsonl 每轮调用都带真实 `usage`，但有两个坑：
 
 | | |
 |---|---|
-| 数据源 | timeline API → Local Storage → IndexedDB → trajectory 文本估算（四层降级） |
+| 数据源 | **只有 timeline API 一条**（cookie 认证，拉全部记录累加） |
 | 换算系数 | **1% = 50 万 token**（`TOKENS_PER_PCT = 500_000`） |
 | 当前实测 | 全时段 499.20% ⇒ **2.50 亿 token** |
 | 精度 | `estimate=1`（靠百分比反算，非本地计数） |
+| 取不到数据时 | **直接报错**，不静默降级（原因见下） |
 
 > ⚠️ 这个系数**只对账户总量成立**——不要用它推算单个任务或某一天的用量
 > （会低估长 agent 任务 3 倍以上），也**不要与其他 Agent 横向比**
@@ -163,15 +164,16 @@ web/            ECharts 看板
 
 ## 兜底方案
 
-任何一个数据源失败，都自动降级到下一层，不会崩：
-
-| 场景 | 兜底行为 |
+| 场景 | 行为 |
 |---|---|
-| API 超时/401 | 降级到 Local Storage 百分比 |
-| Local Storage 没数据 | 降级到 trajectory 文本估算 |
-| IndexedDB 被锁 | 跳过，不影响其他数据源 |
-| 某个插件崩了 | 其他插件正常扫描 |
+| 某个插件崩了 | 其他插件正常扫描，崩的那个标 `status=error` 并打印原因 |
+| **豆包 cookie 缺失/失效** | **明确报错**（不降级），该 agent 本次不更新，旧数据保留 |
 | 服务挂了 | 数据还在 JSON 文件里，重启自动加载 |
+
+豆包为什么不像其他插件那样"降级到本地"：本地任何途径都拿不到与 timeline
+同一额度池的数字（Local Storage 的 `usedThisPeriod` 是另一个池，差 176 倍；
+`trajectory.jsonl` 里根本没有 usage 字段）。给一个会被误读成真实用量的数，
+比明确失败更糟。详见 [`docs/DOUBAO.md`](docs/DOUBAO.md)。
 
 ## 开发
 

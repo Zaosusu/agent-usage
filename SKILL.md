@@ -109,9 +109,10 @@ curl -s -o /dev/null -w "HTTP %{http_code}" --max-time 8 "http://127.0.0.1:8765/
   同一段工作实际在两边能差 5~8 倍。回答「哪个 AI 用最多」时，
   只能表述为**同一口径内的排序**，必须一并提示量纲差异，否则会得出误导结论。
   实测样本见 `docs/DOUBAO.md`「三个必须知道的适用边界 · 边界二」。
-- 豆包工作插件支持可选 cookie 配置（`~/.doubao-usage/config.json`，键 `doubao_cookie`）：
-  配了就拉 timeline API 拿**真实百分比**，没配就本地估算兜底。
+- 豆包工作插件**必须**配 cookie（`~/.doubao-usage/config.json`，键 `doubao_cookie`）：
+  配了才拉得到 timeline API 的**真实百分比**；没配或已过期会**直接报错**
+  （不做本地估算兜底，原因见 [`docs/DOUBAO.md`](docs/DOUBAO.md)「为什么不做本地降级」）。
   但**注意**：即使配了 cookie，API 也只返回**百分比**（如 `0.15%`），
-  绝对 token 仍需乘系数换算 —— 见 [`docs/DOUBAO.md`](docs/DOUBAO.md)。
+  绝对 token 仍需乘系数换算。
 - 新增 Agent 只需在 `plugins/` 丢一个 Python 文件（照 `_template.py` 改，
   记得设 `KEY` / `NAME` / `ESTIMATE` / `WATCH_PATHS`）
