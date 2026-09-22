@@ -254,6 +254,9 @@ const $ = id => document.getElementById(id);
 /* ---------- 增量追踪 ----------
    总量是 185 亿量级的绝对值，而每分钟增量约 0.0017%，两位小数显示看不出来。
    这里保留一个「刷新快照队列」，用近 N 分钟的差值告诉用户系统是否还活着。
+   快照同时记 total 与 today 两个口径：
+     - 挂在「今日用量」卡片下，用 today 差值 —— 分母小、灵敏度高（同样的增量，
+       百分比读数比挂在总量下大两个数量级）。
    快照只存内存 + sessionStorage（刷新页面不清零），不写后端。 */
 const SNAP_KEY = 'agentUsage.snapshots';
 const SNAP_WINDOW_MS = 10 * 60 * 1000;   // 统计窗口：近 10 分钟
@@ -270,40 +273,40 @@ function loadSnapshots(){
 function saveSnapshots(){
   try { sessionStorage.setItem(SNAP_KEY, JSON.stringify(snapshots.slice(-40))); } catch(_){}
 }
-/** 把当前总量压入快照队列，返回 {delta, minutes, hasPrev}
-    关键：按「时间间隔」记录，而不是只在总量变化时记录 ——
-    否则总量完全冻结时队列永远只有 1 个点，会卡在「开始追踪增量…」，
-    用户看到的反而是「可能挂了」，正是这个提示要解决的问题。 */
+/** 把当前 total / today 压入快照队列，返回基线信息
+    关键一：按「时间间隔」记录，而不是只在数值变化时记录 ——
+      否则数据完全冻结时队列永远只有 1 个点，会卡在「开始追踪增量…」，
+      用户看到的反而是「可能挂了」，正是这个提示要解决的问题。
+    关键二：间隔内**绝不回写已有快照的时间戳** ——
+      否则数据每 5 秒都在变时（最需要显示增量的场景），last.t 被一路推到当前，
+      `now - last.t >= 60s` 永远不成立，队列反而只剩 1 个点、永远建不起基线。
+      当前值不需要进队列：算差值时它是入参，队列只负责按固定节奏留历史点。 */
 const SNAP_MIN_GAP_MS = 60 * 1000;       // 至少每 60 秒记一个点，保证基线随时间推进
-function pushSnapshot(total){
+function pushSnapshot(total, today, day){
   const now = Date.now();
   const last = snapshots[snapshots.length-1];
-  if (!last) {
-    snapshots.push({t: now, total: total});
-  } else if (now - last.t >= SNAP_MIN_GAP_MS) {
-    snapshots.push({t: now, total: total});            // 到点了就记，不管值变没变
-  } else if (last.total !== total) {
-    last.t = now; last.total = total;                  // 间隔内数值变了，就地刷新
+  if (!last || now - last.t >= SNAP_MIN_GAP_MS) {
+    snapshots.push({t: now, total: total, today: today, day: day});   // 到点就记，不管值变没变
   }
   // 丢掉窗口外的旧点，但至少保留一个窗口外的点作为基线
   const cutoff = now - SNAP_WINDOW_MS;
   while (snapshots.length > 2 && snapshots[0].t < cutoff && snapshots[1].t < cutoff) snapshots.shift();
   saveSnapshots();
-  return computeDelta(total, now);
+  return computeDelta(now);
 }
-/** 用窗口内最早的一个点做基线算增量；没有基线就返回 hasPrev=false */
-function computeDelta(total, now){
+/** 用窗口内最早的一个点做基线；没有基线就返回 hasPrev=false */
+function computeDelta(now){
   const cutoff = now - SNAP_WINDOW_MS;
   let base = null;
   for (const s of snapshots){ if (s.t <= cutoff) base = s; else break; }
   if (!base) base = snapshots.length > 1 ? snapshots[0] : null;
-  if (!base || base.total === total) {
-    return {delta: 0, minutes: base ? Math.round((now - base.t)/60000) : 0, hasPrev: !!base};
-  }
+  if (!base) return {hasPrev: false, minutes: 0, baseTotal: 0, baseToday: 0, baseDay: ''};
   return {
-    delta: total - base.total,
-    minutes: Math.max(1, Math.round((now - base.t)/60000)),
     hasPrev: true,
+    minutes: Math.max(1, Math.round((now - base.t)/60000)),
+    baseTotal: base.total || 0,
+    baseToday: base.today || 0,
+    baseDay: base.day || '',
   };
 }
 
@@ -368,22 +371,30 @@ function renderKpis(){
   const todayAgents = (data.agents||[]).filter(a=>filterAgent? a.key===filterAgent : a.total_tokens>0);
   todayAgents.forEach(a => { todayTotal += (today[a.key]||0); });
   const estAgents = agents.filter(a=>a.est).map(a=>a.name);
-  // 增量：绝对值被大分母稀释，用「近 N 分钟 +X」让用户一眼看出在动
-  const d = pushSnapshot(t.total_tokens||0);
+  // 增量：绝对值被大分母稀释，用「近 N 分钟 +X」让用户一眼看出在动。
+  // 挂在「今日用量」卡片下 ⇒ 用今日口径算差值，分母小、灵敏度高。
+  const todayDate = today.date || '';
+  const d = pushSnapshot(t.total_tokens||0, todayTotal, todayDate);
+  // 跨天时基线属于昨天，今日差值无意义 ⇒ 重新开始追踪，避免虚高
+  const sameDay = d.hasPrev && d.baseDay === todayDate;
   let deltaHtml;
-  if (!d.hasPrev) {
+  if (!sameDay) {
     deltaHtml = '<div class="delta flat">开始追踪增量…</div>';
-  } else if (d.delta > 0) {
-    const pct = (d.delta / Math.max(1, (t.total_tokens||0) - d.delta)) * 100;
-    deltaHtml = `<div class="delta up">近 ${d.minutes} 分钟 <b>+${fmt(d.delta)}</b>（+${pct.toFixed(3)}%）</div>`;
   } else {
-    deltaHtml = `<div class="delta flat">近 ${d.minutes} 分钟 <b>+0</b> · 无新增</div>`;
+    const delta = todayTotal - d.baseToday;
+    if (delta > 0) {
+      // 今日刚起步时分母极小，百分比会失真 ⇒ 仅在基线非零时显示
+      const pctHtml = d.baseToday > 0
+        ? `（+${((delta / d.baseToday) * 100).toFixed(2)}%）` : '';
+      deltaHtml = `<div class="delta up">近 ${d.minutes} 分钟 <b>+${fmt(delta)}</b>${pctHtml}</div>`;
+    } else {
+      deltaHtml = `<div class="delta flat">近 ${d.minutes} 分钟 <b>+0</b> · 无新增</div>`;
+    }
   }
   const html = `
     <div class="kpi"><div class="lab">总 token 用量</div>
       <div class="val">${fmt(t.total_tokens||0)}</div>
-      <div class="sub">${fmtRaw(t.total_tokens||0)} tokens · 真实${fmt(t.real_tokens||0)} + 估算${fmt(t.est_tokens||0)}</div>
-      ${deltaHtml}</div>
+      <div class="sub">${fmtRaw(t.total_tokens||0)} tokens · 真实${fmt(t.real_tokens||0)} + 估算${fmt(t.est_tokens||0)}</div></div>
     <div class="kpi"><div class="lab">其中：估算类（豆包/千问等）</div>
       <div class="val est">${fmt(t.est_tokens||0)}</div>
       <div class="sub">${fmtRaw(t.est_tokens||0)} tokens · 非精确计数</div></div>
@@ -392,7 +403,8 @@ function renderKpis(){
       <div class="sub">${agents.length} 个 Agent 数据源</div></div>
     <div class="kpi"><div class="lab">今日用量</div>
       <div class="val">${fmt(todayTotal)}</div>
-      <div class="sub">${fmtRaw(todayTotal)} tokens · ${today.date||''}</div></div>`;
+      <div class="sub">${fmtRaw(todayTotal)} tokens · ${todayDate}</div>
+      ${deltaHtml}</div>`;
   $('kpis').innerHTML = html;
 }
 
