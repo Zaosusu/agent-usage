@@ -76,6 +76,12 @@ curl -s -o /dev/null -w "HTTP %{http_code}" --max-time 8 "http://127.0.0.1:8765/
 必须拿到 `HTTP 200`；不是 200 就 `taskkill` 重来。详细排障见
 `doubao-token-calibration` skill 第四节。
 
+⚠️ **姊妹坑：`nohup ... &` 也活不过工具调用**。在 Agent 环境里用
+`(nohup python serve.py --port 8765 &)` 启动，Bash 调用一结束子进程就被回收，
+下次 `curl` 立刻 `ERR_CONNECTION_REFUSED`（同样"看着启动了、其实没了"）。
+**正确做法：用工具的 `run_in_background: true` 启动**（拿到 task_id 常驻），
+不要靠 `nohup`/`&` 兜底。判定标准始终只有一条：**实际 curl 拿到 200**。
+
 ## 已支持的 Agent
 
 | Agent | key | 精确度 |
