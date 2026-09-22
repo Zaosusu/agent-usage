@@ -257,10 +257,35 @@ const $ = id => document.getElementById(id);
    快照同时记 total 与 today 两个口径：
      - 挂在「今日用量」卡片下，用 today 差值 —— 分母小、灵敏度高（同样的增量，
        百分比读数比挂在总量下大两个数量级）。
+   两个阈值（别混）：
+     - SNAP_WINDOW_MS = 10 分钟：**基线回看窗口（封顶）**。基线取「至少 10 分钟前」
+       的点 ⇒ 持续有动静时，读数从「近 1 分钟」一路累计到「近 10 分钟」就封顶不变，
+       你看到的就是**近 10 分钟的流量**（一个稳定的速率，不会越滚越大）。
+     - SNAP_RESET_GAP_MS = 15 分钟：**静默重置**。连续 15 分钟数值毫无变化 ⇒
+       这段区间里什么都没发生，旧累积已无意义 ⇒ 清空队列，回到「开始追踪增量…」
+       从此刻重新计时，避免出现「近 30 分钟」「近 2 小时」这种越滚越大的读数。
+   静默判定看的是「数据有没有变」（activity.at），**不是渲染次数** ——
+   否则页面自身的定时重绘会把静默刷掉，永远触发不了重置。
    快照只存内存 + sessionStorage（刷新页面不清零），不写后端。 */
 const SNAP_KEY = 'agentUsage.snapshots';
-const SNAP_WINDOW_MS = 10 * 60 * 1000;   // 统计窗口：近 10 分钟
+const ACT_KEY = 'agentUsage.activity';
+const SNAP_WINDOW_MS = 10 * 60 * 1000;     // 基线回看窗口（封顶）：近 10 分钟
+const SNAP_RESET_GAP_MS = 15 * 60 * 1000;  // 静默重置阈值：15 分钟没动静就重来
+const SNAP_MIN_GAP_MS = 60 * 1000;         // 至少每 60 秒记一个点，保证基线随时间推进
 let snapshots = loadSnapshots();
+let activity = loadActivity();             // {at: 最后一次「数值变化」的时间, today: 上次今日值}
+
+function loadActivity(){
+  try {
+    const raw = sessionStorage.getItem(ACT_KEY);
+    const o = raw ? JSON.parse(raw) : null;
+    if (o && typeof o.at === 'number') return o;
+  } catch(_){}
+  return {at: 0, today: null};
+}
+function saveActivity(){
+  try { sessionStorage.setItem(ACT_KEY, JSON.stringify(activity)); } catch(_){}
+}
 
 function loadSnapshots(){
   try {
@@ -286,30 +311,51 @@ function saveSnapshots(){
     关键二：间隔内**绝不回写已有快照的时间戳** ——
       否则数据每 5 秒都在变时（最需要显示增量的场景），last.t 被一路推到当前，
       `now - last.t >= 60s` 永远不成立，队列反而只剩 1 个点、永远建不起基线。
-      当前值不需要进队列：算差值时它是入参，队列只负责按固定节奏留历史点。 */
-const SNAP_MIN_GAP_MS = 60 * 1000;       // 至少每 60 秒记一个点，保证基线随时间推进
+      当前值不需要进队列：算差值时它是入参，队列只负责按固定节奏留历史点。
+    关键三：静默（连续 15 分钟数值没变）⇒ 清空队列重新累积。
+      静默判定用 activity.at（数据变化的时刻），**不能用 snapshots 最后一点的时间** ——
+      因为队列每 60 秒就会推进一个点，拿它当"最后活动时间"永远到不了 15 分钟。 */
 function pushSnapshot(total, today, day){
   const now = Date.now();
+  // 记录「数据变化」时刻：只有数值真的变了才算活动
+  if (activity.today === null || activity.today !== today) {
+    activity.at = now;
+    activity.today = today;
+    saveActivity();
+  }
+  // 静默超阈值：清空队列，回到「开始追踪增量…」，从此刻重新计时
+  if (activity.at && now - activity.at >= SNAP_RESET_GAP_MS) {
+    snapshots = [];
+    activity.at = now;          // 重新开始计时，避免每轮都清空
+    saveActivity();
+  }
   const last = snapshots[snapshots.length-1];
   if (!last || now - last.t >= SNAP_MIN_GAP_MS) {
     snapshots.push({t: now, total: total, today: today, day: day});   // 到点就记，不管值变没变
   }
-  // 丢掉窗口外的旧点，但至少保留一个窗口外的点作为基线
+  // 丢掉窗口外的旧点，但**至少保留一个窗口外的点作基线**
+  // （静默期间靠它显示「近 10 分钟 +0」，而不是退回「开始追踪增量…」）
   const cutoff = now - SNAP_WINDOW_MS;
-  while (snapshots.length > 2 && snapshots[0].t < cutoff && snapshots[1].t < cutoff) snapshots.shift();
+  while (snapshots.length > 2 && snapshots[1].t < cutoff) snapshots.shift();
   saveSnapshots();
   return computeDelta(now);
 }
-/** 用窗口内最早的一个点做基线；没有基线就返回 hasPrev=false */
+/** 基线 = 窗口外最近的点；没有就用窗口内最早的点。
+    minutes **封顶在 10 分钟**（SNAP_WINDOW_MS），这样：
+      - 持续有动静：读数累计到 10 分钟就不再增长（稳定速率，可横向比较）
+      - 静默未达重置阈值：显示「近 10 分钟 +0」，而不是越滚越大 */
 function computeDelta(now){
   const cutoff = now - SNAP_WINDOW_MS;
   let base = null;
-  for (const s of snapshots){ if (s.t <= cutoff) base = s; else break; }
+  for (const s of snapshots){ if (s.t < cutoff) base = s; else break; }
   if (!base) base = snapshots.length > 1 ? snapshots[0] : null;
-  if (!base) return {hasPrev: false, minutes: 0, baseTotal: 0, baseToday: 0, baseDay: ''};
+  const last = snapshots[snapshots.length-1];
+  // 无点，或基线就是最新点（区间为 0，形成不了增量）⇒ 无有效基线
+  if (!base || base === last) return {hasPrev: false, minutes: 0, baseTotal: 0, baseToday: 0, baseDay: ''};
+  const cap = Math.round(SNAP_WINDOW_MS / 60000);   // 封顶 10 分钟
   return {
     hasPrev: true,
-    minutes: Math.max(1, Math.round((now - base.t)/60000)),
+    minutes: Math.max(1, Math.min(cap, Math.round((now - base.t)/60000))),
     baseTotal: base.total || 0,
     baseToday: base.today || 0,
     baseDay: base.day || '',
@@ -749,6 +795,15 @@ $('agentFilter').onchange = () => { currentPage = 1; renderTable(); };
 $('searchBox').oninput = () => { currentPage = 1; renderTable(); };
 $('dateStart').onchange = () => { currentPage = 1; renderTable(); };
 $('dateEnd').onchange = () => { currentPage = 1; renderTable(); };
+
+/* ---------- 让「近 N 分钟」真正滑动 ----------
+   页面只在数据变化（SSE 推送）时才重渲染。若没有这个定时器，
+   静默期间窗口不会往前走，读数会僵在最后一次刷新的值上。
+   每 15 秒重算一次：窗口推进 + 静默超阈值时触发重置。 */
+setInterval(function(){
+  if (!data) return;
+  try { renderKpis(); } catch(_){}
+}, 15 * 1000);
 
 /* ---------- boot ---------- */
 (function boot(){
