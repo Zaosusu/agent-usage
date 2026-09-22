@@ -267,7 +267,13 @@ function loadSnapshots(){
     const raw = sessionStorage.getItem(SNAP_KEY);
     if (!raw) return [];
     const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr.filter(s => s && typeof s.t === 'number') : [];
+    if (!Array.isArray(arr)) return [];
+    // 只接受当前格式的点（必须含 today + day）。
+    // 旧格式（只有 t/total）必须丢弃：它的 baseDay 是空串 ⇒ sameDay 恒为 false，
+    // 且会占住基线位置抢不回来 ⇒ 永久卡在「开始追踪增量…」。
+    // 换口径/改字段时靠这条自动作废旧快照，不需要用户手动清 sessionStorage。
+    return arr.filter(s => s && typeof s.t === 'number'
+      && typeof s.today === 'number' && typeof s.day === 'string');
   } catch(_){ return []; }
 }
 function saveSnapshots(){
@@ -360,6 +366,26 @@ function toast(msg){
 }
 
 /* ---------- KPI ---------- */
+/** 给「开始追踪增量…约 N 秒后显示」挂一个轻量倒计时。
+    数据没变化时不会触发重渲染，倒计时会僵在初始值 ⇒ 必须自己走字。 */
+let countdownTimer = null;
+function startCountdown(){
+  const el = document.getElementById('deltaWait');
+  if (!el) return;
+  if (countdownTimer) clearInterval(countdownTimer);
+  countdownTimer = setInterval(function(){
+    const n = parseInt(el.dataset.wait || '0', 10) - 1;
+    if (n <= 0) {
+      clearInterval(countdownTimer); countdownTimer = null;
+      // 时间到：主动重渲染一次，立刻把基线换成增量数字
+      // （正常 SSE 推送也会覆盖，这里只是让切换更即时）
+      try { render(); } catch(_){}
+      return;
+    }
+    el.dataset.wait = n;
+    el.textContent = '开始追踪增量…约 ' + n + ' 秒后显示';
+  }, 1000);
+}
 function renderKpis(){
   const t = data.totals || {};
   const sessCount = data.session_count || data.sessions.length;
@@ -377,9 +403,14 @@ function renderKpis(){
   const d = pushSnapshot(t.total_tokens||0, todayTotal, todayDate);
   // 跨天时基线属于昨天，今日差值无意义 ⇒ 重新开始追踪，避免虚高
   const sameDay = d.hasPrev && d.baseDay === todayDate;
-  let deltaHtml;
+  let deltaHtml, needCountdown = false;
   if (!sameDay) {
-    deltaHtml = '<div class="delta flat">开始追踪增量…</div>';
+    // 首次打开要等满 1 分钟才有基线。写清倒计时，否则用户会以为卡住了。
+    const wait = snapshots.length >= 1
+      ? Math.max(1, Math.ceil((SNAP_MIN_GAP_MS - (Date.now() - snapshots[snapshots.length-1].t)) / 1000))
+      : 60;
+    needCountdown = true;
+    deltaHtml = `<div class="delta flat" id="deltaWait" data-wait="${wait}">开始追踪增量…约 ${wait} 秒后显示</div>`;
   } else {
     const delta = todayTotal - d.baseToday;
     if (delta > 0) {
@@ -406,6 +437,7 @@ function renderKpis(){
       <div class="sub">${fmtRaw(todayTotal)} tokens · ${todayDate}</div>
       ${deltaHtml}</div>`;
   $('kpis').innerHTML = html;
+  if (needCountdown) startCountdown();
 }
 
 
