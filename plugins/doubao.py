@@ -1,56 +1,34 @@
 # -*- coding: utf-8 -*-
 """插件：豆包工作。
-数据来源（三层校准，优先级从高到低）：
+
+【核心】豆包云端只返回**百分比**，没有绝对 token 字段。所以只需一条固定换算：
+
+    TOKENS_PER_PCT = 500_000        # 1% = 50 万 token
+
+    总量 = timeline 百分比 × 50 万
+
+其余一切都是为论证这个系数服务的，推导与证据链见 docs/DOUBAO.md
+（可一键复现：python tools/calibrate_doubao.py）。
+
+数据来源（优先级从高到低）：
 1. timeline API 百分比（最精确）：Cookie 认证，拉全部记录累加
-2. Local Storage 订阅百分比（本地）：从 leveldb 读 usedThisPeriod/monthlyLimit
-3. trajectory 文本估算（兜底，按日期分布）：扫 .sessions 目录，按天拆分
+2. trajectory 文本估算（兜底，按日期分布）：扫 .sessions 目录，按天拆分
 
-校准系数：TOKENS_PER_PCT = 500_000（1% ≈ 50 万 token），来自「消息级对齐」直接测量。
-推导全过程见 README「系数校准：1% 等于多少 token」一节，可一键复现：
-    python tools/calibrate_doubao.py
+【两条边界，读数前必读】
+- **只对账户总量成立**：1% 不是固定 token 数，按任务长度浮动 7.7 倍
+  （短对话 21.1 万 / 中等 46.7 万 / 长 agent 161.9 万）。拿 50 万 推算单个任务
+  或某一天，会低估长任务 3~8 倍。
+- **不能与其他 Agent 横向比**：豆包记的是折后计价量，WorkBuddy 等记原始传输量。
 
-【为什么是「暂定」而非「精确」】
-- 豆包的 timeline API 只返回百分比（quota_source.display_text，如 "0.15%"），
-  配额接口只返回 used_percent（占 7 天额度），**本地与 API 均无任何「绝对 token 数」字段**。
-  所以无法像 WorkBuddy 那样做 1:1 硬锚点反推，只能用「本地重建 ÷ 同批 timeline 百分比」夹逼。
-- 唯一可靠的测法是**消息级对齐**：timeline 每条 = 一条 user 消息，本地重建按同一批消息
-  累加 token。分子分母来自**同一批消息**，对齐成立性可用双向匹配率验证。
+【系数怎么来的（三行版）】
+- 消息级对齐：timeline 每条 = 一条 user 消息，本地重建按同一批消息累加。
+  双向匹配 正向 83.3% / 反向 94.9% ⇒ 对齐成立。
+- 定义式：Σtok(全量) 246,085,702 ÷ Σpct(全量) 499.200% = 49.3 万/1% ⇒ 取整 **50 万**。
+- 独立交叉验证：256K 窗口下 max 单次上下文 242,683 + system 2,671 只剩 16,790 余量
+  ⇒ 系数上界 58.9 万（能否定 120 万/230 万，定不了真值）。50 万 落在区间内。
 
-  ⚠️ **但注意：「同批消息」≠「同口径消耗」**（2026-09-22 更正，此处曾写错）：
-  对齐只保证消息集合一致，不保证消耗量一致。凡本地看不到的消耗
-  （tool schema 每次重发、推理 token、非 agent 用量）都**只进分母不进分子**
-  ⇒ 算出的系数**系统性偏低**。
-  ⇒ 上界由窗口约束给出：模型窗口 = **256K**（doubao-seed-2-1-turbo / -pro 均为 256K；
-  本地配置出现的模型只有这两个系列，无 1M 窗口模型）。实测 max 单次上下文 242,683，
-  加 system prompt 后距 256K 只剩 **16,790 tok** —— 这是全部「看不见的消耗」每次的总预算
-  ⇒ **系数上界 58.9 万**（它能否定 120 万 / 230 万，但定不了真值）。
-  真值取**定义式** Σtok(全量) / Σpct(全量)。详见 README「最大的适用边界」一节。
-
-【测量结果（2026-09-22 复核；47 会话 / 1504 turn / 2856 次模型调用 / 3043 工具调用）】
-- 双向匹配验证：timeline 1590 条中 **83.3%** 能对上本地 agent 消息（占 Σpct 80.0%）；
-  反向本地 1366 条消息中 **94.9%** 能在 timeline 找到 ⇒ 匹配是真的，不是巧合。
-- 命中密度（只覆盖命中批，**偏长任务，不作总量系数**）：
-  Σtok 243,325,388 ÷ Σpct 399.535% = **60.9 万/1%**
-- 账户系数（**定义式，采用它**）：Σtok 246,085,702 ÷ Σpct 499.200% = **49.3 万/1%**
-  ⇒ 取整采用 **50 万**。它只覆盖「本地可见消耗」⇒ 是**下界**（上界 58.9 万，见上）。
-  ⚠️ 早期版本写「①②取中 ⇒ 50 万」是错推理（未识别 ① 的样本偏差），凑巧同值。
-
-【已作废的系数与原因（改之前务必先读）】
-- 500 万：commit 90c788c 把 50 万拍成 500 万（diff 一行、无依据），虚高 10 倍。
-- 230 万：commit 463818f 拿 IndexedDB 里 65 条陪伴会话（conv_mori）记录当「硬锚点」。
-  **该推导不成立**：① 窗口从 ±0 放宽到 ±60min，系数从 256 万漂到 6 万（40 倍），
-  说明分子分母根本不是同一批事件；② 该库全量字节里 `quota_source_code` 出现 **0 次**，
-  「同额度池」无法证明；③ 那 65 条时间集中在 01:46~01:59，是 memory 压缩批量落盘，
-  不是真实调用时刻。
-- 47.8 万：只算消息体，漏掉上下文重发。
-- 113.6 万：在 tool 消息处**多加一次「上下文重放」**，同一份 input 算两遍，高估约 2 倍。
-  正确模型：一次 assistant 消息 = 一次模型调用，消耗 = 累积上下文 + 本条输出。
-- 120 万：继承 113.6 万的错误区间（113.6~139.0 万），一并作废。
-
-【如何进一步钉死】
-拿到「一个 7 天窗口 = 多少 token」的绝对数即可一击锁死：
+【钉死精确值】拿到「一个 7 天窗口 = 多少 token」的绝对数即可一击锁死：
     python tools/calibrate_doubao.py --anchor 1.5e8 --apply
-数字来源：豆包用量页「占 7 天额度」旁的绝对已用/总额，或订阅计划的单窗口 token 配额。
 """
 import os, re, json, time, urllib.request
 from engine.common import collect_strings, estimate_tokens
@@ -60,37 +38,7 @@ NAME = '豆包工作'
 ESTIMATE = True
 WATCH_PATHS = ['%USERPROFILE%\\AppData\\Local\\DoubaoWork\\User Data\\Default']
 
-# 系数：1% = 50 万 token —— **仅对「账户总量」成立**（2026-09-22 定稿）。
-#
-# 【定义式】系数 = Σtok(全量本地重建) / Σpct(timeline 全时段)
-#             = 246,085,702 / 499.200% = 49.3 万/1%  ⇒ 取整 50 万
-#   这个口径保证「pct × 系数 = 该账户全时段的原始 token 总量」是对的。
-#
-# 【⚠️ 最大的适用边界：1% ≠ 固定 token 数】分型实测（见 calibrate 脚本 ①·补）：
-#     短对话   (<3 次调用)   227.2%  →  0.478 亿  ⇒   21.1 万/1%
-#     中等     (3~10 次)      72.5%  →  0.338 亿  ⇒   46.7 万/1%
-#     长 agent (≥10 次)       99.9%  →  1.617 亿  ⇒  161.9 万/1%
-#   同为 1%，长任务对应的原始 token 是短对话的 **7.7 倍**。原因：agent 长循环里绝大部分
-#   input 是**重复的累积上下文**，云端按**缓存折扣**计费 ⇒ 同样 1% 覆盖多得多的原始 token。
-#   所以**不能拿 50 万去推算单个任务/单天的 token 量**（会低估长任务 3~8 倍）。
-#   用户 2026-09-22 的直觉（「一天用 50% 额度怎么可能才 2500 万」）正是命中了这一点：
-#   若那天以长 agent 任务为主，70% ≈ **1.1 亿**原始 token，而不是 2500 万。
-#
-# 【测量要点：2026-09-22 修掉的两个真 bug（会显著影响结果）】
-#   1) **连续 user 消息算一个工作单元**：用户会连发短消息、模型只回一次，而 timeline 给
-#      每条都记了 pct。旧实现把整轮消耗全算给最后一条 ⇒ 前面的 key 有 pct 无 token
-#      ⇒ 系数被系统性拽低 2~4 倍。现在单元内均摊，Σ(单元各 key) = 单元总消耗。
-#   2) user 消息本身也是 input，必须计入累积上下文（旧实现漏了）。
-#
-# 【验证】匹配率：正向 1325/1590 = 83.3%（占 Σpct 80.0%）、反向 1296/1366 = 94.9%。
-#   但双对数相关系数 **r 仅 0.185** ⇒ % 与原始 token **非严格正比**（正是缓存折扣所致）。
-#   所以「匹配率高」只说明事件能对上，**不等于可以乘系数推单个任务的量**。
-#   窗口检验：256K 窗口下系数上界 58.9 万（max 单次上下文 242,683 + system 2,671 = 245,354，
-#   距窗口仅剩 16,790）；故 120 万 / 230 万 物理不可能（单次均值会到窗口 80% / 153%）。
-#   ⚠️ 上界依赖「2856 次调用 = 账户全部消耗」这一前提；若有未落盘的调用，上界相应放宽。
-#
-# 已作废：500 万（90c788c 十倍误改）、230 万（463818f 窗口漂 40 倍 + 编造同额度池）、
-#         47.8 万（漏算上下文）、113.6 万（重复计算）、120 万（继承 113.6 万错误区间）。
+# 固定系数：1% = 50 万 token（仅对「账户总量」成立，边界见模块 docstring）
 TOKENS_PER_PCT = 500_000
 
 _DEFAULT_ROOT = os.path.expanduser(WATCH_PATHS[0].replace('%USERPROFILE%', os.path.expanduser('~')))
@@ -213,27 +161,6 @@ def _extract_cookie():
         return None
 
 
-def _scan_quota():
-    ls_dir = os.path.join(_DEFAULT_ROOT, 'Local Storage', 'leveldb')
-    if not os.path.isdir(ls_dir):
-        return None
-    text = ''
-    for fn in os.listdir(ls_dir):
-        if fn.endswith('.ldb') or fn.endswith('.log'):
-            try:
-                with open(os.path.join(ls_dir, fn), 'rb') as f:
-                    text += f.read().decode('utf-8', 'ignore')
-            except Exception:
-                pass
-    m_used = re.search(r'"usedThisPeriod":(\d+)', text)
-    m_limit = re.search(r'"monthlyLimit":(\d+)', text)
-    used = int(m_used.group(1)) if m_used else 0
-    limit = int(m_limit.group(1)) if m_limit else 0
-    if limit > 0 and used > 0:
-        return (used / limit, used, limit)
-    return None
-
-
 def _scan_indexeddb():
     idb_dir = os.path.join(_DEFAULT_ROOT, 'IndexedDB')
     total_in = 0
@@ -331,7 +258,6 @@ def _wrap_result(sessions, daily_map, source):
 def scan(full, need, mark):
     cookie = _extract_cookie()
     api_pct, api_count, api_daily = _fetch_timeline(cookie)
-    quota = _scan_quota()
     idx_in, idx_out = _scan_indexeddb()
     daily_traj = _scan_trajectory_daily()
 
@@ -340,12 +266,14 @@ def scan(full, need, mark):
         source = f'timeline-api ({api_count}条, {api_pct:.1f}%)'
         # 用 API 返回的按日期分组的用量
         daily_pct = api_daily
-    elif quota:
-        pct, used, limit = quota
-        total_est = int(pct * 100 * TOKENS_PER_PCT)
-        source = 'local-quota'
-        daily_pct = None
     else:
+        # cookie 缺失/失效 ⇒ 直接用 trajectory 文本估算兜底。
+        #
+        # ⚠️ 不要在这里插入 Local Storage 的 usedThisPeriod/monthlyLimit：
+        #    那是**另一个额度池**（plan:premium / billingMode:metered，周期约 4 个月，
+        #    单位疑似按次或点数），实测 2.83% vs timeline 499.20% —— 差 176 倍。
+        #    乘 TOKENS_PER_PCT 会得出 141.5 万（正确量级 2.50 亿），低估 176 倍。
+        #    2026-09-22 移除该分支（曾是 `elif quota:`，会导致降级时用量暴跌）。
         total_est = sum(daily_traj.values())
         source = 'trajectory-estimate'
         daily_pct = None
