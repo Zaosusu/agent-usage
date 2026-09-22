@@ -32,3 +32,5 @@ snappy_*.py
 count_*.py
 list_dou*.py
 _shots/
+.shot/
+shots/
