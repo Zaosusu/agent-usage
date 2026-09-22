@@ -48,6 +48,13 @@ sys.path.insert(0, ROOT)
 from engine.common import estimate_tokens          # noqa: E402
 from plugins.doubao import _extract_cookie, _fetch_timeline  # noqa: E402
 
+# 模型上下文窗口（判决「物理不可能」的基准）。
+# doubao-seed-2-1-turbo / -pro 均为 256K（火山引擎官方套餐文档），
+# 本地配置里出现过的模型也只有这两个 256K 系列 + doubao-seed-character，
+# **没有任何 1M 窗口模型** ⇒ agent 模式每次调用都在 256K 内。
+# ⚠️ 早前此处按 128K 判决是错的：实测 max 上下文 240,688 本身就超 128K。
+WINDOW_TOKENS = 256 * 1024
+
 
 def default_root():
     """豆包工作数据根目录（通用路径，不含个人信息）。"""
@@ -334,36 +341,61 @@ def main():
     # ③ 物理合理性检验：单次 API 调用不可能超过模型上下文窗口
     print()
     print('-' * 72)
-    print('③ 物理合理性检验（独立于匹配率，只看上下文窗口约束）')
+    print(f'③ 物理合理性检验（独立于匹配率，只看 {WINDOW_TOKENS//1024}K 上下文窗口约束）')
     ctxs = sorted(stats.get('ctx_list') or [])
     if ctxs:
         n = len(ctxs)
         avg_ctx = sum(ctxs) / n
+        sys_avg = stats.get('sys_avg') or 0
+        vis_mean = stats['call_cost_sys'] / n      # 可见单次总计（含 sys）
+        k = m['tl_total'] / n                       # 单次均值 = 系数 × k
+
         print(f'   实测 agent 模式单次「调用时上下文」：'
               f'中位 {ctxs[n//2]:,} / p90 {ctxs[9*n//10]:,} / max {ctxs[-1]:,} / 均值 {avg_ctx:,.0f} tok')
-        print(f'   这是下限（未含 system prompt / tool schema / 非 agent 用量）')
+        print(f'   可见单次总计（含 system prompt {sys_avg:,.0f}）: {vis_mean:,.0f} tok')
+        print(f'   这是下限（未含 tool schema / 推理 token / 图片 / 非 agent 用量）')
         print()
-        print(f'   {"系数":<10}{"全时段总量":>12}{"÷调用次数":>12}{"vs 实测均值":>12}  合理性')
-        print('   ' + '-' * 62)
-        for nm, c in [('47.8 万', 47.8e4), ('50 万', 50e4), ('58 万', 58e4),
-                      ('120 万', 120e4), ('150 万', 150e4), ('230 万', 230e4)]:
-            tot = m['tl_total'] * c
-            per = tot / n
-            ratio = per / avg_ctx
-            if per < 128_000:
-                note = '✅ 在 128K 窗口内'
-            elif per < 200_000:
-                note = '⚠ 超 128K 窗口'
+
+        # 用 max 那次调用反推：全部漏算项每次能占多少预算
+        leak_budget = WINDOW_TOKENS - ctxs[-1] - sys_avg
+        coef_hi = (vis_mean + leak_budget) / k
+        print(f'   ★ max 那次调用 {ctxs[-1]:,} + system {sys_avg:,.0f} = {ctxs[-1]+sys_avg:,.0f}，'
+              f'距 {WINDOW_TOKENS:,} 窗口仅剩 {leak_budget:,.0f} tok')
+        print(f'     这 {leak_budget:,.0f} 就是全部「看不见的消耗」每次能占的总预算')
+        print(f'   ⇒ 系数上界 = ({vis_mean:,.0f} + {leak_budget:,.0f}) / k = '
+              f'{coef_hi:,.0f}  ({coef_hi/1e4:.1f} 万/1%)')
+        print(f'   ⇒ 与「账户下限」口径给出的下界合起来，真值被夹在闭合区间里')
+        print()
+
+        print(f'   {"系数":<10}{"全时段总量":>11}{"账户均值":>11}{"漏算/次":>10}'
+              f'{"max那次真实":>13}  判决')
+        print('   ' + '-' * 70)
+        for nm, c in [('47.8 万', 47.8e4), ('50 万', 50e4), ('55 万', 55e4),
+                      ('58 万', 58e4), ('59 万', 59e4), ('120 万', 120e4),
+                      ('150 万', 150e4), ('230 万', 230e4)]:
+            per = c * k
+            leak = per - vis_mean
+            max_real = ctxs[-1] + sys_avg + leak
+            if max_real > WINDOW_TOKENS:
+                note = '❌ 该次调用突破窗口'
+            elif c > coef_hi:
+                note = '❌ 超上界'
+            elif c < 46.7e4:
+                note = '⚠ 低于可见量，偏小'
             else:
-                note = '❌ 远超窗口，不可能'
-            mark = '  ← 现行' if abs(c - rec) < 1 else ''
-            print(f'   {nm:<10}{tot/1e8:>10.2f} 亿{per:>12,.0f}{ratio:>11.2f}x  {note}{mark}')
+                note = '✅ 在窗口内'
+            mark = '  ← 现行' if abs(c - 50e4) < 1 else ''
+            if abs(c - 55e4) < 1:
+                mark = '  ← 推定真值'
+            print(f'   {nm:<10}{c*m["tl_total"]/1e8:>9.2f} 亿{per:>11,.0f}'
+                  f'{leak:>10,.0f}{max_real:>13,.0f}  {note}{mark}')
         print()
-        print(f'   读法：50 万 ⇒ 账户均值 {m["tl_total"]*rec/n:,.0f} tok ≈ 实测 agent 均值 × '
-              f'{m["tl_total"]*rec/n/avg_ctx:.2f}（未建模部分占 {m["tl_total"]*rec/n/avg_ctx-1:.0%}，合理）；')
-        print(f'         230 万 ⇒ 账户均值 {m["tl_total"]*230e4/n:,.0f} tok，'
-              f'要求单次调用平均 {m["tl_total"]*230e4/n/avg_ctx:.1f} 倍于 agent 实测值，')
-        print(f'         且绝对数远超任何模型的上下文窗口 —— 物理上不成立。')
+        print(f'   读法：下界 = 可见消耗实测密度（漏算只会让真值更大，不可能更小）；')
+        print(f'         上界 = max 调用占满窗口后，留给漏算的预算只有 {leak_budget:,.0f} tok/次。')
+        hi_wan = int(coef_hi / 1e3) / 10          # 向下取，避免显示成"59 万"（实际已超窗）
+        print(f'   ⇒ 真值区间 50 ~ {hi_wan} 万/1%，取整建议 55 万/1%'
+              f'（区间中点 {(50e4+coef_hi)/2/1e4:.1f} 万）')
+        print(f'   ⚠️ 若将来发现 agent 会用 1M 窗口模型，此上界需放宽（当前本地无此证据）。')
 
     # ④ 已知偏差：推理 token 不可见（影响有界，需说明）
     print()
