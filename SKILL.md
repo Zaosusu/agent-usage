@@ -95,8 +95,9 @@ curl -s -o /dev/null -w "HTTP %{http_code}" --max-time 8 "http://127.0.0.1:8765/
 > 注意插件文件名是 `ccswitch.py`、文件内 `KEY='ccswitch'`，但**上报 key 是 `codex`/`claude`**。
 
 标"估算"的 Agent 本地没有精确 token 用量，按文本长度或费用折算，仅供参考。
-**豆包**是唯一需要系数校准的（云端只给百分比）；其系数推导、验证与排障
-见独立 skill `doubao-token-calibration`（已固化，勿重推）。
+**豆包**是唯一需要系数校准的（云端只给百分比）；其系数依据、验证过程与适用边界
+见 [`docs/DOUBAO.md`](docs/DOUBAO.md)，操作与排障见独立 skill
+`doubao-token-calibration`（已固化，勿重推）。
 
 ## 注意事项
 
@@ -107,10 +108,10 @@ curl -s -o /dev/null -w "HTTP %{http_code}" --max-time 8 "http://127.0.0.1:8765/
   豆包 / 千问记的是**折后计价量换算**（缓存命中的重复上下文近乎免费）。
   同一段工作实际在两边能差 5~8 倍。回答「哪个 AI 用最多」时，
   只能表述为**同一口径内的排序**，必须一并提示量纲差异，否则会得出误导结论。
-  实测样本见 README「三个必须知道的适用边界 · 边界二」。
+  实测样本见 `docs/DOUBAO.md`「三个必须知道的适用边界 · 边界二」。
 - 豆包工作插件支持可选 cookie 配置（`~/.doubao-usage/config.json`，键 `doubao_cookie`）：
   配了就拉 timeline API 拿**真实百分比**，没配就本地估算兜底。
   但**注意**：即使配了 cookie，API 也只返回**百分比**（如 `0.15%`），
-  绝对 token 仍需乘系数换算 —— 见 `doubao-token-calibration` skill。
+  绝对 token 仍需乘系数换算 —— 见 [`docs/DOUBAO.md`](docs/DOUBAO.md)。
 - 新增 Agent 只需在 `plugins/` 丢一个 Python 文件（照 `_template.py` 改，
   记得设 `KEY` / `NAME` / `ESTIMATE` / `WATCH_PATHS`）
