@@ -39,6 +39,7 @@ import sys
 import json
 import time
 import glob
+import math
 import urllib.request
 import argparse
 
@@ -122,6 +123,7 @@ def rebuild_sessions(root, verbose=True):
     turn_items = []        # (day, user_text, turn_token)
     by_key = {}            # 消息 key -> token（含 system prompt）
     by_key_ns = {}         # 消息 key -> token（不含）
+    by_key_calls = {}      # 消息 key -> 摊到的模型调用次数（用于分型系数）
     ctx_list = []          # 每次调用时的上下文长度（用于物理合理性检验）
     output_cost = 0        # 输出侧合计（assistant 本条），用于推理 token 影响估算
 
@@ -135,9 +137,14 @@ def rebuild_sessions(root, verbose=True):
         cur_day = time.strftime('%Y-%m-%d', time.localtime(os.path.getmtime(fp)))
         cur_text = ''
         cur_tok = 0
-        cur_key = None
-        cur_key_tok = 0.0
-        cur_key_tok_ns = 0.0
+        # ⚠️ 两个曾经踩过的坑（2026-09-22 修）：
+        #  1) **连续 user 消息算一个「工作单元」**：用户会连发短消息（"你看看"→"还是这个啊"），
+        #     模型只回一次，而 timeline 给每条都记一个 pct。旧实现把整轮的消耗全算给最后一条，
+        #     前面的 key 拿到 pct 却 token=0 ⇒ 把系数系统性拽低约 2~4 倍。
+        #     现在：单元内所有 key 均摊随后 assistant 调用的消耗，Σ(单元内各 key) = 单元总消耗。
+        #  2) **user 消息本身也是输入**，必须计入 ctx（旧实现漏了）。
+        open_keys = []
+        burst_replied = False
         for ln in lines:
             ln = ln.strip()
             if not ln:
@@ -151,25 +158,32 @@ def rebuild_sessions(root, verbose=True):
             if role == 'user':
                 if cur_text:
                     turn_items.append((cur_day, cur_text, cur_tok))
-                if cur_key:
-                    by_key[cur_key] = by_key.get(cur_key, 0.0) + cur_key_tok
-                    by_key_ns[cur_key] = by_key_ns.get(cur_key, 0.0) + cur_key_tok_ns
+                if burst_replied:          # 上一条已得到回复 ⇒ 开启新工作单元
+                    open_keys = []
                 cur_text = _user_text(o)
-                cur_key = _norm(cur_text)[:40] or None
+                k = _norm(cur_text)[:40] or None
+                if k and k not in open_keys:
+                    open_keys.append(k)
                 cur_tok = 0
-                cur_key_tok = 0.0
-                cur_key_tok_ns = 0.0
+                burst_replied = False
                 stats['turns'] += 1
+                ctx += t
             elif role == 'assistant':
                 stats['assistant'] += 1
                 stats['model_calls'] += 1
                 call_cost += ctx + t
                 call_cost_sys += ctx + t + sys_avg
                 cur_tok += ctx + t
-                cur_key_tok += ctx + t + sys_avg
-                cur_key_tok_ns += ctx + t
+                if open_keys:
+                    share = (ctx + t + sys_avg) / len(open_keys)
+                    share_ns = (ctx + t) / len(open_keys)
+                    for k in open_keys:
+                        by_key[k] = by_key.get(k, 0.0) + share
+                        by_key_ns[k] = by_key_ns.get(k, 0.0) + share_ns
+                        by_key_calls[k] = by_key_calls.get(k, 0.0) + 1.0 / len(open_keys)
                 ctx_list.append(ctx)
                 output_cost += t
+                burst_replied = True
                 ctx += t
             elif role == 'tool':
                 # 只进上下文，不另计消耗（它的成本体现在下一次调用的 input 里）
@@ -179,15 +193,13 @@ def rebuild_sessions(root, verbose=True):
                 ctx += t
         if cur_text:
             turn_items.append((cur_day, cur_text, cur_tok))
-        if cur_key:
-            by_key[cur_key] = by_key.get(cur_key, 0.0) + cur_key_tok
-            by_key_ns[cur_key] = by_key_ns.get(cur_key, 0.0) + cur_key_tok_ns
 
     stats['call_cost'] = call_cost
     stats['call_cost_sys'] = call_cost_sys
     stats['turn_items'] = turn_items
     stats['by_key'] = by_key
     stats['by_key_ns'] = by_key_ns
+    stats['by_key_calls'] = by_key_calls
     stats['ctx_list'] = ctx_list
     stats['output_cost'] = output_cost
     stats['sys_avg'] = sys_avg
@@ -261,6 +273,48 @@ def message_alignment(stats, timeline_entries):
     )
 
 
+def workload_split(stats, timeline_entries):
+    """按任务长度分型给出各档系数 —— 证明「1% ≠ 固定 token 数」。
+
+    机制：agent 长任务里绝大部分 input 是**重复的累积上下文**，云端按缓存折扣计费，
+    所以「同样 1%，长任务代表的原始 token 远多于短对话」。账户级系数只是混合平均，
+    不能当作「1% = X 万 token」的定律用（用户 2026-09-22 凭直觉命中了这一点）。
+
+    返回 dict(buckets=[(label,n,Σpct,Σtok,coef)], r=双对数相关系数)。
+    """
+    tl_pct = {}
+    for ts_ms, pct, name, code in timeline_entries:
+        k = _norm(name)[:40]
+        if k:
+            tl_pct[k] = tl_pct.get(k, 0.0) + pct
+    by_key = stats.get('by_key', {})
+    calls = stats.get('by_key_calls', {})
+
+    buckets = [('短对话    (<3 次调用)', 0, 3),
+               ('中等      (3~10 次)', 3, 10),
+               ('长 agent  (≥10 次)', 10, float('inf'))]
+    out = []
+    for label, lo, hi in buckets:
+        ks = [k for k in by_key if k in tl_pct and lo <= calls.get(k, 0) < hi]
+        sp = sum(tl_pct[k] for k in ks)
+        st = sum(by_key[k] for k in ks)
+        out.append((label, len(ks), sp, st, (st / sp if sp else 0.0)))
+
+    # 双对数相关系数（对齐若为真应接近 1）
+    pts = [(calls.get(k, 0), by_key[k], tl_pct[k]) for k in by_key if k in tl_pct]
+    pts = [(c, t, p) for c, t, p in pts if t > 0 and p > 0]
+    r = 0.0
+    if len(pts) > 2:
+        lx = [math.log(t) for _, t, _ in pts]
+        ly = [math.log(p) for _, _, p in pts]
+        mx = sum(lx) / len(lx)
+        my = sum(ly) / len(ly)
+        num = sum((a - mx) * (b - my) for a, b in zip(lx, ly))
+        den = math.sqrt(sum((a - mx) ** 2 for a in lx) * sum((b - my) ** 2 for b in ly))
+        r = num / den if den else 0.0
+    return dict(buckets=out, r=r, n=len(pts))
+
+
 # ---------------------------------------------------------------- main
 
 def main():
@@ -315,6 +369,18 @@ def main():
           f'({m["bwd_n"]/max(m["bwd_total"],1)*100:.1f}%)')
     print(f'   命中 key 数         : {m["by_key"]}')
 
+    ws = workload_split(stats, entries)
+    print()
+    print('①·补 分型系数（同一个 1% 不等于同样的 token 数 —— 这是账户级系数的适用边界）')
+    print(f'   {"任务类型":<24}{"key数":>7}{"Σpct":>10}{"Σtok":>12}{"隐含系数":>12}')
+    print('   ' + '-' * 64)
+    for label, n_, sp, st, coef in ws['buckets']:
+        print(f'   {label:<24}{n_:>7}{sp:>9.1f}%{st/1e8:>10.3f}亿{coef/1e4:>10.1f}万')
+    print(f'   双对数相关系数 r = {ws["r"]:.3f}（对齐若为真应接近 1；弱相关 ⇒ % 与原始 token 非严格正比）')
+    print('   ⚠️ 长任务每 1% 代表的原始 token 远多于短对话：长 agent 循环里绝大部分 input 是')
+    print('      重复的累积上下文，云端按**缓存折扣**计费。所以账户系数只是混合平均，')
+    print('      不能用「1% = X 万」去推算单个任务/单天的实际 token 量（会低估长任务 3 倍以上）。')
+
     print()
     print('② 两个口径（真值介于两者之间）')
     print(f'   agent 内容密度 = Σtok(命中) / Σpct(命中)')
@@ -328,15 +394,17 @@ def main():
     print(f'      不含             : {stats["call_cost"]:,.0f} / {m["tl_total"]:.3f}% '
           f'= {m["floor_ns"]/1e4:.1f} 万/1%')
 
-    lo = min(m['density'], m['floor'])
-    hi = max(m['density'], m['floor'])
-    med = (lo + hi) / 2
-    rec = int(round(med / args.round_to) * args.round_to)
+    # 账户级系数 = Σtok(全量) / Σpct(全量)，定义上等价于「raw 总量 ÷ 百分比总量」。
+    # ⚠️ 不能用「命中密度 density」当总量系数：命中的 key 偏长任务，密度天然高于账户混合平均
+    #    （见 ①·补 分型：长 agent 161.9 万 vs 短对话 21.1 万）。density 只用于交叉验证对齐为真。
+    rec = int(round(m['floor'] / args.round_to) * args.round_to)
 
     print()
-    print(f'   区间 : {lo/1e4:.1f} ~ {hi/1e4:.1f} 万/1%')
-    print(f'   推荐 : {rec/1e4:.0f} 万/1%（取中，取整粒度 {args.round_to//10000} 万）')
-    print(f'   ⇒ 全时段 {m["tl_total"]:.1f}% = {m["tl_total"]*rec/1e8:.2f} 亿 token')
+    print(f'   命中密度 : {m["density"]/1e4:.1f} 万/1%（只覆盖命中批，偏长任务 —— 不是总量系数）')
+    print(f'   账户系数 : {m["floor"]/1e4:.1f} 万/1%（Σtok全量 / Σpct全量 ⇒ 用于全时段总量换算）')
+    print(f'   推荐     : {rec/1e4:.0f} 万/1%（取整粒度 {args.round_to//10000} 万）')
+    print(f'   ⇒ 全时段 {m["tl_total"]:.1f}% = {m["tl_total"]*rec/1e8:.2f} 亿 token（**原始** token，含重复上下文）')
+    print(f'   ⚠️ 该值只保证「账户总量」对；单个任务/单天的实际量随任务长度浮动 7~8 倍（见 ①·补）。')
 
     # ③ 物理合理性检验：单次 API 调用不可能超过模型上下文窗口
     print()
@@ -364,7 +432,7 @@ def main():
         print(f'     这 {leak_budget:,.0f} 就是全部「看不见的消耗」每次能占的总预算')
         print(f'   ⇒ 系数上界 = ({vis_mean:,.0f} + {leak_budget:,.0f}) / k = '
               f'{coef_hi:,.0f}  ({coef_hi/1e4:.1f} 万/1%)')
-        print(f'   ⇒ 与「账户下限」口径给出的下界合起来，真值被夹在闭合区间里')
+        print(f'   ⇒ 这一条只给上界（能否定 120 万/230 万），定不了真值；真值取定义式')
         print()
 
         print(f'   {"系数":<10}{"全时段总量":>11}{"账户均值":>11}{"漏算/次":>10}'
@@ -384,17 +452,15 @@ def main():
                 note = '⚠ 低于可见量，偏小'
             else:
                 note = '✅ 在窗口内'
-            mark = '  ← 现行' if abs(c - 50e4) < 1 else ''
-            if abs(c - 55e4) < 1:
-                mark = '  ← 推定真值'
+            mark = '  ← 现行（定义式）' if abs(c - 50e4) < 1 else ''
             print(f'   {nm:<10}{c*m["tl_total"]/1e8:>9.2f} 亿{per:>11,.0f}'
                   f'{leak:>10,.0f}{max_real:>13,.0f}  {note}{mark}')
         print()
         print(f'   读法：下界 = 可见消耗实测密度（漏算只会让真值更大，不可能更小）；')
         print(f'         上界 = max 调用占满窗口后，留给漏算的预算只有 {leak_budget:,.0f} tok/次。')
         hi_wan = int(coef_hi / 1e3) / 10          # 向下取，避免显示成"59 万"（实际已超窗）
-        print(f'   ⇒ 真值区间 50 ~ {hi_wan} 万/1%，取整建议 55 万/1%'
-              f'（区间中点 {(50e4+coef_hi)/2/1e4:.1f} 万）')
+        print(f'   ⇒ 系数上界 {hi_wan} 万/1%（能否定 120 万 / 230 万，但定不了真值）')
+        print(f'   ⚠️ 上界前提：2856 次调用 = 账户全部消耗；若有未落盘的调用，上界相应放宽。')
         print(f'   ⚠️ 若将来发现 agent 会用 1M 窗口模型，此上界需放宽（当前本地无此证据）。')
 
     # ④ 已知偏差：推理 token 不可见（影响有界，需说明）
@@ -422,7 +488,8 @@ def main():
         print()
         print(f'   ⇒ 要到 230 万需总消耗 +{need*100:.0f}%，'
               f'即推理量须达可见输出的 {need/share+1:.0f} 倍 —— 不现实。')
-        print(f'   ⇒ 合理估计推理使系数 +10~30%，真值约 {rec*1.1/1e4:.0f}~{rec*1.3/1e4:.0f} 万。')
+        print(f'   ⇒ 推理缺失最多让系数 +7.5%（R=20），**不足以改变量级**。相比之下')
+        print(f'      「任务长度」对「每 1% 值多少 token」的影响是 7.7 倍（见 ①·补），那才是主因。')
 
     cur = _current_coef()
     if cur:
