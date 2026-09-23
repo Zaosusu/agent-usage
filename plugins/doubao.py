@@ -77,14 +77,36 @@ def _timeline_headers(cookie_str):
 
 
 def _fetch_timeline(cookie_str):
-    """拉 timeline API，返回 (总百分比, 记录数, {日期: 当日百分比})"""
+    """拉 timeline API，返回 (总百分比, 唯一条目数, {日期: 当日百分比})
+
+    【两个必须同时做的防护：页间延迟 + item_id 去重】
+    根因是**分页限流**：连续快速翻页时，API 会开始重复返回已经给过的
+    条目（游标每次都变、v3./v4. 交替，但内容按 ~4 页周期循环），而
+    has_more **始终为 True**（实测 200/200 永不终止）。
+
+    实测对照（2026-09-23，同一天同一 cookie）：
+      | 方式             | 页数 | 唯一条目 | 累加 pct | 换算   |
+      |------------------|------|----------|----------|--------|
+      | 无延迟（旧实现） | 200  | 180      | 851.54%  | 4.26亿 |
+      | 有延迟（0.25s）  | 80   | 1591     | 499.20%  | 2.50亿 |
+    旧实现把同一批条目重复计入 ⇒ 总量虚高约 1.7 倍（甚至更高，取决于限流强度），
+    且**每日拆分同样被污染**（同一天被重复累加）。
+
+    证据：同一 item_id 每次出现 pct 恒定（440/440 全部一致）⇒ 去重合法无损。
+
+    因此：① 页间 sleep 让分页正常回溯；② 按 item_id 去重兜底；
+    ③ 终止条件不能只信 has_more，叠加「连续 N 页无新条目」判定。
+    """
     if not cookie_str:
         return None, None, {}
     headers = _timeline_headers(cookie_str)
+    seen = set()          # item_id 去重
     all_pct = 0.0
-    count = 0
     daily = {}
     cursor = None
+    stale = 0             # 连续无新条目的页数
+    _STALE_LIMIT = 40     # 实测到顶后 40 页内不会有新条目，留足余量
+    _PAGE_DELAY = 0.25    # 关键：不加延迟会触发限流，分页开始重复返回
     try:
         for _ in range(200):
             body = json.dumps({"cursor": cursor} if cursor else {}).encode()
@@ -95,9 +117,17 @@ def _fetch_timeline(cookie_str):
             entries = d.get("entries", [])
             if not entries:
                 break
+            new_in_page = 0
             for e in entries:
                 u = e.get("usage", {})
                 pct_str = u.get("quota_source", {}).get("display_text", "0%")
+                ts = u.get("occurred_at_ms", 0) / 1000 if u.get("occurred_at_ms") else 0
+                # 去重键：优先 item_id，缺失时退化为 (时间, 百分比) 组合
+                iid = u.get("item_id", "") or f"{int(ts)}|{pct_str}"
+                if iid in seen:
+                    continue
+                seen.add(iid)
+                new_in_page += 1
                 if "<" in pct_str:
                     pct = 0.005
                 else:
@@ -106,18 +136,23 @@ def _fetch_timeline(cookie_str):
                     except ValueError:
                         pct = 0
                 all_pct += pct
-                count += 1
-                # 提取日期
-                ts = u.get("occurred_at_ms", 0) / 1000 if u.get("occurred_at_ms") else 0
                 if ts > 0:
                     day = time.strftime('%Y-%m-%d', time.localtime(ts))
                     daily[day] = daily.get(day, 0) + pct
+            # 游标会循环 ⇒ 连续无新条目即判定到顶
+            if new_in_page == 0:
+                stale += 1
+                if stale >= _STALE_LIMIT:
+                    break
+            else:
+                stale = 0
             cursor = d.get("next_cursor")
             if not d.get("has_more") or not cursor:
                 break
+            time.sleep(_PAGE_DELAY)   # 限流保护，必须在翻页前
     except Exception:
         return None, None, {}
-    return all_pct, count, daily
+    return all_pct, len(seen), daily
 
 
 def _extract_cookie():
