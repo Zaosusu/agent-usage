@@ -70,6 +70,7 @@ WorkBuddy 的 jsonl 每轮调用都带真实 `usage`，但有两个坑：
 也**不要与其他 Agent 横向比**（豆包记折后计价量，WorkBuddy 等记原始传输量，量纲不同）。
 
 **这个 50 万 是怎么定出来的 → [`docs/DOUBAO.md`](docs/DOUBAO.md)**
+**豆包校准与排障手册（操作向，含已作废错值清单）→ [`docs/SKILL-doubao-calibration.md`](docs/SKILL-doubao-calibration.md)**
 
 需要配置 cookie 拿精确百分比时：`~/.doubao-usage/config.json`
 ```json
