@@ -41,7 +41,7 @@
 【钉死精确值】拿到「一个 7 天窗口 = 多少 token」的绝对数即可一击锁死：
     python tools/calibrate_doubao.py --anchor 1.5e8 --apply
 """
-import os, json, time, urllib.request
+import os, sys, json, time, urllib.request
 
 KEY = 'doubao'
 NAME = '豆包工作'
@@ -52,6 +52,13 @@ WATCH_PATHS = ['%USERPROFILE%\\AppData\\Local\\DoubaoWork\\User Data\\Default']
 TOKENS_PER_PCT = 500_000
 
 _CONFIG_PATH = os.path.expanduser("~/.doubao-usage/config.json")
+
+# 本地数据目录（与引擎的 usage.db 同处 data/），存防衰减高水位快照
+if getattr(sys, 'frozen', False):
+    _BASE = os.path.dirname(sys.executable)
+else:
+    _BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_HISTORY_PATH = os.path.join(_BASE, 'data', 'doubao_history.json')
 
 _DEFAULT_ROOT = os.path.expanduser(WATCH_PATHS[0].replace('%USERPROFILE%', os.path.expanduser('~')))
 
@@ -176,6 +183,81 @@ def _cookie_hint():
             f"多半已过期：请重新登录 doubao.com 复制 Cookie 覆盖该文件")
 
 
+# ---------------------------------------------------------------- 防衰减高水位
+# 背景：本接口返回的是**账户累计消耗**，理论上只增不减。但豆包用量页有
+# 「只展示最近半年的历史记录」——若该窗口也作用于本接口，旧条目会陆续掉出，
+# 导致累计值**随时间回落**。用户明确要求：一旦出现明显衰减，必须用本地记录的
+# 历史数据，不要让看板数字跟着掉。
+#
+# 做法：把历史最高值（高水位）落盘到 data/doubao_history.json；每次扫描若发现
+# 新值低于高水位，就沿用高水位（并在 source_file 里标注），使曲线只增不减。
+_DECAY_TOL = 0.005   # 相对容差 0.5%：低于此幅度视为抖动，不触发保护
+
+
+def _load_history():
+    """读历史高水位。兼容早期的旧格式（last_pct_this_period）。"""
+    try:
+        with open(_HISTORY_PATH, 'r', encoding='utf-8') as f:
+            h = json.load(f)
+    except Exception:
+        return {}
+    if not isinstance(h, dict):
+        return {}
+    # 旧格式迁移：早期版本用 cumulated_pct / last_pct_this_period 命名
+    if 'high_water_pct' not in h:
+        legacy = h.get('last_pct_this_period') or h.get('cumulated_pct') or 0
+        if legacy:
+            h = {'high_water_pct': float(legacy),
+                 'high_water_count': int(h.get('last_count') or 0),
+                 'daily': {},
+                 'updated_at': float(h.get('updated_at') or 0)}
+        else:
+            return {}
+    return h
+
+
+def _save_history(pct, count, daily):
+    """原子写高水位快照。"""
+    tmp = _HISTORY_PATH + '.tmp'
+    try:
+        os.makedirs(os.path.dirname(_HISTORY_PATH), exist_ok=True)
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump({'high_water_pct': round(float(pct), 4),
+                       'high_water_count': int(count),
+                       'daily': {k: round(float(v), 4) for k, v in (daily or {}).items()},
+                       'updated_at': time.time()}, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, _HISTORY_PATH)
+    except Exception:
+        try:
+            os.path.exists(tmp) and os.remove(tmp)
+        except Exception:
+            pass
+
+
+def _apply_decay_guard(api_pct, api_count, api_daily):
+    """高水位保护：新值低于历史最高时，沿用历史值，让累计量只增不减。
+
+    返回 (pct, count, daily, note)，note 为空表示未触发保护。
+    """
+    hist = _load_history()
+    hw = float(hist.get('high_water_pct') or 0)
+    if hw <= 0:
+        # 首次运行：直接落盘当前值作为高水位
+        _save_history(api_pct, api_count, api_daily)
+        return api_pct, api_count, api_daily, ''
+    if api_pct >= hw * (1 - _DECAY_TOL):
+        # 正常增长（或抖动范围内）：刷新高水位
+        _save_history(api_pct, api_count, api_daily)
+        return api_pct, api_count, api_daily, ''
+    # 触发保护：接口值明显低于历史最高
+    drop = (hw - api_pct) / hw * 100
+    hw_count = int(hist.get('high_water_count') or api_count)
+    hw_daily = hist.get('daily') or api_daily
+    note = (f'衰减保护：接口 {api_pct:.2f}% 低于历史最高 {hw:.2f}%'
+            f'（-{drop:.1f}%），已沿用本地高水位')
+    return hw, hw_count, hw_daily, note
+
+
 def _wrap_result(sessions, daily_map, source):
     """按引擎新协议返回 {sessions, daily, daily_files}，让豆包进入按天曲线。
 
@@ -202,14 +284,19 @@ def scan(full, need, mark):
     if not api_pct or api_pct <= 0:
         raise RuntimeError(f'豆包用量取不到：{_cookie_hint()}')
 
-    source = f'timeline-api ({api_count}条, {api_pct:.1f}%)'
+    # 防衰减：累计量理论上只增不减，若接口值回落则沿用本地高水位
+    pct, count, daily, guard_note = _apply_decay_guard(api_pct, api_count, api_daily)
+
+    source = f'timeline-api ({count}条, {pct:.1f}%)'
+    if guard_note:
+        source += f' [{guard_note}]'
     daily_map = {}   # day -> tokens，供 daily 表使用
     sessions = []
     today_str = time.strftime('%Y-%m-%d')
-    for day, pct in sorted((api_daily or {}).items()):
+    for day, p in sorted((daily or {}).items()):
         if day > today_str:
             continue
-        day_tokens = int(pct * TOKENS_PER_PCT)
+        day_tokens = int(p * TOKENS_PER_PCT)
         if day_tokens < 1000:
             continue
         daily_map[day] = day_tokens
