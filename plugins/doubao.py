@@ -48,7 +48,7 @@
 【钉死精确值】拿到「一个 7 天窗口 = 多少 token」的绝对数即可一击锁死：
     python tools/calibrate_doubao.py --anchor 1.5e8 --apply
 """
-import os, sys, json, time, urllib.request
+import os, sys, json, time, urllib.request, urllib.error
 
 KEY = 'doubao'
 NAME = '豆包工作'
@@ -96,6 +96,38 @@ def _timeline_headers(cookie_str):
     }
 
 
+# 最近一次拉取失败的原因，供 scan() 生成**准确**的报错文案。
+#   ('net',  ...) —— 网络/TLS 层失败，与 cookie 无关（实测有 UNEXPECTED_EOF_WHILE_READING 抖动）
+#   ('auth', ...) —— 接口可达但认证失败/无数据，多半 cookie 过期
+_last_error = None
+
+
+def _request_page(cookie_str, cursor, timeout=20, retries=3):
+    """拉 timeline 单页，带指数退避重试。
+
+    为什么必须重试：整轮要翻 80+ 页、耗时 2 分钟，而 SSL 层实测存在偶发抖动
+    （`UNEXPECTED_EOF_WHILE_READING`）。单页抖动就让整轮白费太亏，故重试。
+    4xx 是确定性错误（认证/参数），重试无意义，直接上抛。
+    """
+    headers = _timeline_headers(cookie_str)
+    body = json.dumps({"cursor": cursor} if cursor else {}).encode()
+    last = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(_TIMELINE_URL, data=body,
+                                         headers=headers, method="POST")
+            return json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+        except urllib.error.HTTPError as e:
+            if 400 <= e.code < 500:      # 认证/参数类，重试无用
+                raise
+            last = e
+        except Exception as e:
+            last = e
+        if attempt < retries - 1:
+            time.sleep(0.8 * (2 ** attempt))   # 0.8s / 1.6s
+    raise last
+
+
 def _fetch_timeline(cookie_str):
     """拉 timeline API，返回 (总百分比, 唯一条目数, {日期: 当日百分比})
 
@@ -119,7 +151,7 @@ def _fetch_timeline(cookie_str):
     """
     if not cookie_str:
         return None, None, {}
-    headers = _timeline_headers(cookie_str)
+    global _last_error
     seen = set()          # item_id 去重
     all_pct = 0.0
     daily = {}
@@ -129,10 +161,7 @@ def _fetch_timeline(cookie_str):
     _PAGE_DELAY = 0.25    # 关键：不加延迟会触发限流，分页开始重复返回
     try:
         for _ in range(200):
-            body = json.dumps({"cursor": cursor} if cursor else {}).encode()
-            req = urllib.request.Request(_TIMELINE_URL, data=body,
-                                         headers=headers, method="POST")
-            r = json.loads(urllib.request.urlopen(req, timeout=15).read())
+            r = _request_page(cookie_str, cursor)
             d = r.get("data", {})
             entries = d.get("entries", [])
             if not entries:
@@ -170,8 +199,16 @@ def _fetch_timeline(cookie_str):
             if not d.get("has_more") or not cursor:
                 break
             time.sleep(_PAGE_DELAY)   # 限流保护，必须在翻页前
-    except Exception:
+    except Exception as e:
+        # 区分「网络层抖动」与「认证失败」——两者处置完全不同：
+        #   网络失败 ⇒ 重试/稍后再扫，cookie 没坏，别去重新登录
+        #   HTTP 4xx ⇒ 多半 cookie 过期，需补 cookie
+        if isinstance(e, urllib.error.HTTPError) and 400 <= e.code < 500:
+            _last_error = ('auth', f'HTTP {e.code}')
+        else:
+            _last_error = ('net', f'{type(e).__name__}: {str(e)[:120]}')
         return None, None, {}
+    _last_error = None
     return all_pct, len(seen), daily
 
 
@@ -188,12 +225,20 @@ def _extract_cookie():
 
 
 def _cookie_hint():
-    """报错文案：cookie 缺失/失效时告诉用户下一步怎么做。"""
+    """报错文案：按**真实失败原因**给出下一步，别一律怪 cookie。
+
+    实测教训：SSL 层有偶发抖动（`UNEXPECTED_EOF_WHILE_READING`），
+    早期文案一律写「cookie 多半已过期」，会让人白去重新登录复制 cookie。
+    """
     if not os.path.isfile(_CONFIG_PATH):
         return (f"未配置 cookie：请把浏览器里 doubao.com 的 Cookie 写入 {_CONFIG_PATH}\n"
                 f'    格式：{{"doubao_cookie": "你的cookie字符串"}}')
-    return (f"cookie 已配置（{_CONFIG_PATH}）但拿不到 timeline 数据，"
-            f"多半已过期：请重新登录 doubao.com 复制 Cookie 覆盖该文件")
+    if _last_error and _last_error[0] == 'net':
+        return (f"网络/TLS 请求失败（与 cookie 无关，cookie 仍是好的）：{_last_error[1]}\n"
+                f"    已自动重试 3 次仍失败，稍后重扫即可，无需重新登录")
+    return (f"cookie 已配置（{_CONFIG_PATH}）但接口认证失败"
+            f"{'（' + _last_error[1] + '）' if _last_error else ''}，多半已过期："
+            f"请重新登录 doubao.com 复制 Cookie 覆盖该文件")
 
 
 # ---------------------------------------------------------------- 防衰减高水位

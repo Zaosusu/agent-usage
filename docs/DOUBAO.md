@@ -331,3 +331,16 @@ python tools/calibrate_doubao.py --anchor <一个7天窗口的token数> --apply
 ```
 
 > 即使配了 cookie，API 也只返回**百分比**（如 `0.15%`），绝对 token 仍需 × 50 万 换算。
+
+### 网络抖动 ≠ cookie 过期（2026-09-23）
+
+SSL 层实测有偶发抖动（`UNEXPECTED_EOF_WHILE_READING`），会让 `scan` 报
+「豆包用量取不到」。**这不是 cookie 过期** —— 判定：`curl https://www.doubao.com/`
+能通 + DNS 正常 ⇒ 网络抖动，稍后重扫即可。
+
+加固：
+- `_request_page()` 带**指数退避重试 3 次**（0.8s/1.6s）。整轮要翻 80+ 页、
+  耗时约 2 分钟，单页抖动不该让整轮白费；HTTP 4xx 属确定性错误，不重试。
+- 报错文案按 `_last_error` 的 `('net',…)` / `('auth',…)` **分流**：
+  网络类会明确告知「与 cookie 无关，cookie 仍是好的，无需重新登录」，
+  避免白跑一趟重新登录。

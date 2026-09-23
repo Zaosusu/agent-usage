@@ -79,8 +79,14 @@ def main():
         ap.print_help()
         return
     only = set(args.agents.split(',')) if args.agents else None
+    import time as _time
+    _t0 = _time.time()
     data, stats = core.scan(full=args.full, only=only)
-    print('scan done at', data['generated_at_str'])
+    _elapsed = _time.time() - _t0
+    # generated_at 是**扫描开始时**生成的，长扫描下与「现在」能差几分钟，
+    # 故分别打印，避免把开始时刻误读成完成时刻（排障时踩过）。
+    print(f'scan started at {data["generated_at_str"]}  (耗时 {_elapsed:.1f}s)')
+    print(f'scan finished at {_time.strftime("%Y-%m-%d %H:%M:%S")}')
     for k, v in stats.items():
         print(f"  {k:12s} status={v['status']} upserted={v.get('upserted', 0)} "
               f"sec={v.get('seconds', 0)}" + (f" error={v['error']}" if 'error' in v else ''))
