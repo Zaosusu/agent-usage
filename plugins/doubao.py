@@ -13,6 +13,11 @@
 【数据来源】只有一条：timeline API 百分比（Cookie 认证，拉全部记录累加）。
 拿不到就**直接抛错**，绝不静默降级 —— 理由见下。
 
+【本地存档】高水位与完整时序都落在引擎的 `data/usage.db`：
+- `agent_high_water`    —— 累计量高水位（单行/agent），接口回落时据此兜底
+- `agent_usage_history` —— 每 agent 每天的 pct/tokens 时序，只增不减
+两者都**只增不减**（写回时取 max），保证曲线不会被接口抖动或历史窗口收缩打回去。
+
 【为什么不做降级】本地任何途径都拿不到与 timeline 同一额度池的数字：
 - Local Storage 的 usedThisPeriod/monthlyLimit 是**另一个额度池**
   （plan:premium / billingMode:metered，周期约 4 个月），实测 2.83% vs
@@ -29,6 +34,8 @@
 - **只对账户总量成立**：1% 不是固定 token 数，按任务长度浮动 7.7 倍
   （短对话 21.1 万 / 中等 46.7 万 / 长 agent 161.9 万）。拿 50 万 推算单个任务
   或某一天，会低估长任务 3~8 倍。
+  ⚠️ 但**按天的百分比拆分本身是精确的**（实测 Σ每日 pct = 总 pct，误差 0.0），
+  所以 `agent_usage_history` 里的 pct 时序可信；失真的只是 pct→token 的换算系数。
 - **不能与其他 Agent 横向比**：豆包记的是折后计价量，WorkBuddy 等记原始传输量。
 
 【系数怎么来的（三行版）】
@@ -53,11 +60,17 @@ TOKENS_PER_PCT = 500_000
 
 _CONFIG_PATH = os.path.expanduser("~/.doubao-usage/config.json")
 
-# 本地数据目录（与引擎的 usage.db 同处 data/），存防衰减高水位快照
+# 存档落在引擎的 usage.db（与 sessions/daily/meta 同库）：
+#   agent_high_water       —— 每 agent 一行的累计量高水位
+#   agent_usage_history    —— 每 agent 每天的完整时序
+# 表结构由 engine/core.py 的 _conn() 统一创建（这里只兜底，见 _db()）。
 if getattr(sys, 'frozen', False):
     _BASE = os.path.dirname(sys.executable)
 else:
     _BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DB_PATH = os.path.join(_BASE, 'data', 'usage.db')
+
+# 早期版本把高水位存在独立 JSON 里；已废弃，仅保留用于一次性迁移
 _HISTORY_PATH = os.path.join(_BASE, 'data', 'doubao_history.json')
 
 _DEFAULT_ROOT = os.path.expanduser(WATCH_PATHS[0].replace('%USERPROFILE%', os.path.expanduser('~')))
@@ -189,73 +202,146 @@ def _cookie_hint():
 # 导致累计值**随时间回落**。用户明确要求：一旦出现明显衰减，必须用本地记录的
 # 历史数据，不要让看板数字跟着掉。
 #
-# 做法：把历史最高值（高水位）落盘到 data/doubao_history.json；每次扫描若发现
-# 新值低于高水位，就沿用高水位（并在 source_file 里标注），使曲线只增不减。
+# 存档位置：引擎的 data/usage.db（早期版本存独立 JSON，已迁移，见 _migrate_json）
+#   agent_high_water      —— 累计量高水位（单行）
+#   agent_usage_history   —— 每 agent 每天的完整时序（只增不减）
 _DECAY_TOL = 0.005   # 相对容差 0.5%：低于此幅度视为抖动，不触发保护
 
+_SCHEMA = '''
+CREATE TABLE IF NOT EXISTS agent_high_water(
+    agent TEXT PRIMARY KEY,
+    high_water_pct REAL DEFAULT 0,
+    high_water_tokens INTEGER DEFAULT 0,
+    high_water_count INTEGER DEFAULT 0,
+    updated_at INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS agent_usage_history(
+    agent TEXT NOT NULL,
+    day TEXT NOT NULL,
+    pct REAL DEFAULT 0,
+    tokens INTEGER DEFAULT 0,
+    updated_at INTEGER DEFAULT 0,
+    PRIMARY KEY(agent, day)
+);
+'''
 
-def _load_history():
-    """读历史高水位。兼容早期的旧格式（last_pct_this_period）。"""
+
+def _db():
+    """连 usage.db 并兜底建表（表结构权威定义在 engine/core.py）。
+
+    兜底建表是为了让插件能脱离引擎单独跑（如校准脚本、手工排障）。
+    """
+    import sqlite3
+    os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
+    con = sqlite3.connect(_DB_PATH, timeout=10)
+    con.executescript(_SCHEMA)
+    return con
+
+
+def _migrate_json(con):
+    """一次性把早期独立 JSON 的高水位迁进 DB（迁完即删，避免双份真相）。"""
+    if not os.path.isfile(_HISTORY_PATH):
+        return
     try:
         with open(_HISTORY_PATH, 'r', encoding='utf-8') as f:
             h = json.load(f)
+        if not isinstance(h, dict):
+            raise ValueError('bad json')
+        # 旧旧格式用 cumulated_pct / last_pct_this_period 命名
+        pct = h.get('high_water_pct') or h.get('last_pct_this_period') or h.get('cumulated_pct') or 0
+        count = int(h.get('high_water_count') or h.get('last_count') or 0)
+        pct = float(pct)
+        if pct > 0:
+            con.execute(
+                'insert into agent_high_water(agent, high_water_pct, high_water_tokens,'
+                ' high_water_count, updated_at) values(?,?,?,?,?) '
+                'on conflict(agent) do nothing',
+                (KEY, pct, int(pct * TOKENS_PER_PCT), count, int(time.time())))
+            for day, p in (h.get('daily') or {}).items():
+                con.execute(
+                    'insert into agent_usage_history(agent, day, pct, tokens, updated_at)'
+                    ' values(?,?,?,?,?) on conflict(agent, day) do nothing',
+                    (KEY, day, float(p), int(float(p) * TOKENS_PER_PCT), int(time.time())))
+            con.commit()
+        os.remove(_HISTORY_PATH)   # 迁移完成，删掉孤儿文件（避免双份真相）
     except Exception:
-        return {}
-    if not isinstance(h, dict):
-        return {}
-    # 旧格式迁移：早期版本用 cumulated_pct / last_pct_this_period 命名
-    if 'high_water_pct' not in h:
-        legacy = h.get('last_pct_this_period') or h.get('cumulated_pct') or 0
-        if legacy:
-            h = {'high_water_pct': float(legacy),
-                 'high_water_count': int(h.get('last_count') or 0),
-                 'daily': {},
-                 'updated_at': float(h.get('updated_at') or 0)}
-        else:
-            return {}
-    return h
+        pass   # 迁移失败不影响主流程：DB 里没有就按首次运行处理
 
 
-def _save_history(pct, count, daily):
-    """原子写高水位快照。"""
-    tmp = _HISTORY_PATH + '.tmp'
-    try:
-        os.makedirs(os.path.dirname(_HISTORY_PATH), exist_ok=True)
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump({'high_water_pct': round(float(pct), 4),
-                       'high_water_count': int(count),
-                       'daily': {k: round(float(v), 4) for k, v in (daily or {}).items()},
-                       'updated_at': time.time()}, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, _HISTORY_PATH)
-    except Exception:
-        try:
-            os.path.exists(tmp) and os.remove(tmp)
-        except Exception:
-            pass
+def _load_high_water(con):
+    row = con.execute('select high_water_pct, high_water_count from agent_high_water'
+                      ' where agent=?', (KEY,)).fetchone()
+    if not row:
+        return 0.0, 0
+    return float(row[0] or 0), int(row[1] or 0)
+
+
+def _load_history_daily(con):
+    """读完整时序，返回 {day: pct}。"""
+    rows = con.execute('select day, pct from agent_usage_history where agent=?', (KEY,)).fetchall()
+    return {d: float(p or 0) for d, p in rows}
+
+
+def _write_archive(con, pct, count, daily):
+    """落盘高水位 + 按天时序（都只增不减）。"""
+    now = int(time.time())
+    con.execute(
+        'insert into agent_high_water(agent, high_water_pct, high_water_tokens,'
+        ' high_water_count, updated_at) values(?,?,?,?,?) '
+        'on conflict(agent) do update set'
+        ' high_water_pct=excluded.high_water_pct,'
+        ' high_water_tokens=excluded.high_water_tokens,'
+        ' high_water_count=excluded.high_water_count,'
+        ' updated_at=excluded.updated_at',
+        (KEY, round(float(pct), 4), int(float(pct) * TOKENS_PER_PCT), int(count), now))
+    for day, p in (daily or {}).items():
+        # 只增不减：该天已有更大值就保留（防接口抖动把历史天改小）
+        con.execute(
+            'insert into agent_usage_history(agent, day, pct, tokens, updated_at)'
+            ' values(?,?,?,?,?) '
+            'on conflict(agent, day) do update set'
+            ' pct=max(agent_usage_history.pct, excluded.pct),'
+            ' tokens=max(agent_usage_history.tokens, excluded.tokens),'
+            ' updated_at=excluded.updated_at',
+            (KEY, day, round(float(p), 4), int(float(p) * TOKENS_PER_PCT), now))
+    con.commit()
 
 
 def _apply_decay_guard(api_pct, api_count, api_daily):
-    """高水位保护：新值低于历史最高时，沿用历史值，让累计量只增不减。
+    """高水位保护 + 时序存档，返回 (pct, count, daily, note)。
 
-    返回 (pct, count, daily, note)，note 为空表示未触发保护。
+    采用的累计量 = max(历史高水位, 本次接口总量, 逐日并集之和)，即**只增不减**。
+    返回的 daily 是「本地时序 ∪ 本次接口按天」的逐日取大结果，再整体缩放一次，
+    使其 Σ == 返回的 pct —— 保证 sessions 汇总恒等于高水位，总量与按天不会打架
+    （正常情况两者本就相等，缩放系数为 1，不改动任何数字）。
+
+    note 非空表示触发了衰减保护（接口值明显低于历史最高，已沿用本地高水位）。
     """
-    hist = _load_history()
-    hw = float(hist.get('high_water_pct') or 0)
-    if hw <= 0:
-        # 首次运行：直接落盘当前值作为高水位
-        _save_history(api_pct, api_count, api_daily)
-        return api_pct, api_count, api_daily, ''
-    if api_pct >= hw * (1 - _DECAY_TOL):
-        # 正常增长（或抖动范围内）：刷新高水位
-        _save_history(api_pct, api_count, api_daily)
-        return api_pct, api_count, api_daily, ''
-    # 触发保护：接口值明显低于历史最高
-    drop = (hw - api_pct) / hw * 100
-    hw_count = int(hist.get('high_water_count') or api_count)
-    hw_daily = hist.get('daily') or api_daily
-    note = (f'衰减保护：接口 {api_pct:.2f}% 低于历史最高 {hw:.2f}%'
-            f'（-{drop:.1f}%），已沿用本地高水位')
-    return hw, hw_count, hw_daily, note
+    con = _db()
+    try:
+        _migrate_json(con)
+        hw, hw_count = _load_high_water(con)
+        merged = _load_history_daily(con)          # 本地已存的历史时序
+        for day, p in (api_daily or {}).items():   # 并入本次接口拿到的天（逐日取大）
+            merged[day] = max(merged.get(day, 0), p)
+
+        s = sum(merged.values())
+        final_pct = max(hw, api_pct, s)            # 只增不减
+        if s > 0 and abs(s - final_pct) > 1e-6:    # 逐日并集与总量不一致时对齐
+            k = final_pct / s
+            merged = {d: v * k for d, v in merged.items()}
+        final_count = max(api_count or 0, hw_count or 0)   # 条目数同样只增不减
+
+        _write_archive(con, final_pct, final_count, merged)
+
+        note = ''
+        if hw > 0 and api_pct < hw * (1 - _DECAY_TOL):
+            drop = (hw - api_pct) / hw * 100
+            note = (f'衰减保护：接口 {api_pct:.2f}% 低于历史最高 {hw:.2f}%'
+                    f'（-{drop:.1f}%），已保留本地存档（含完整时序），总量未回落')
+        return final_pct, final_count, merged, note
+    finally:
+        con.close()
 
 
 def _wrap_result(sessions, daily_map, source):

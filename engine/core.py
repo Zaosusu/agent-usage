@@ -98,6 +98,28 @@ def _conn():
             est INTEGER DEFAULT 0,
             PRIMARY KEY(agent, day, source_file)
         );
+        -- 账户累计量的高水位（防衰减判决用，每 agent 单行）
+        -- 适用对象：云端只给「累计消耗」而无历史时序的 agent（如豆包）。
+        -- sessions/daily 都是覆盖式写入、零历史，一旦接口回落就无从恢复，
+        -- 故单独存一份只增不减的水位。
+        CREATE TABLE IF NOT EXISTS agent_high_water(
+            agent TEXT PRIMARY KEY,
+            high_water_pct REAL DEFAULT 0,
+            high_water_tokens INTEGER DEFAULT 0,
+            high_water_count INTEGER DEFAULT 0,
+            updated_at INTEGER DEFAULT 0
+        );
+        -- 账户用量的完整时序（每 agent 每天一行，只增不减）
+        -- daily 表记的是「当天消耗」且会被引擎按数据源覆盖；本表按天留存历史，
+        -- 用于趋势回溯与防衰减时重建曲线。
+        CREATE TABLE IF NOT EXISTS agent_usage_history(
+            agent TEXT NOT NULL,
+            day TEXT NOT NULL,
+            pct REAL DEFAULT 0,
+            tokens INTEGER DEFAULT 0,
+            updated_at INTEGER DEFAULT 0,
+            PRIMARY KEY(agent, day)
+        );
     ''')
     return con
 
