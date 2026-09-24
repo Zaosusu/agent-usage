@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Agent 用量监控</title>
+<title>算力资源管理局</title>
 <style>
 :root{
   --bg:#F5F6F8; --card:#FFFFFF; --ink:#171C26; --ink-2:#5A6472; --ink-3:#8A93A2;
@@ -19,6 +19,9 @@ html,body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-siz
 header{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:6px 0 18px}
 .brand{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:700;letter-spacing:.2px}
 .brand svg{width:26px;height:26px}
+.brand-text{display:flex;flex-direction:column;gap:1px}
+.brand-title{font-size:18px;font-weight:700;letter-spacing:.2px;line-height:1.2}
+.brand-sub{font-size:12px;font-weight:500;color:var(--ink-2);line-height:1.2;letter-spacing:.3px}
 .meta{margin-left:auto;display:flex;align-items:center;gap:14px;color:var(--ink-2);font-size:13px}
 .meta .today-usage{font-size:14px;font-weight:600;color:var(--ink)}
 .meta .today-usage .num{color:var(--accent);font-size:16px;margin-left:4px}
@@ -105,7 +108,10 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--line);font-si
         <rect x="2.5" y="2.5" width="19" height="19" rx="5" stroke="#2456D6" stroke-width="2"/>
         <path d="M7 15.5V8.5M12 15.5V12M17 15.5V5.5" stroke="#2456D6" stroke-width="2.2" stroke-linecap="round"/>
       </svg>
-      Agent 用量监控
+      <div class="brand-text">
+        <div class="brand-title">算力资源管理</div>
+        <div class="brand-sub">算力 HR · Token 劳务派遣</div>
+      </div>
     </div>
     <div class="meta">
       <span id="liveStatus" class="live"><i></i>实时监控中</span>
