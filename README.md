@@ -1,8 +1,8 @@
-﻿# agent-usage-skill
+﻿# 算力资源管理
 
-> 本地多 AI Agent Token 用量统一监控 Skill
+> 算力 HR · Token 劳务派遣 —— 本地多 AI Agent Token 用量统一监控 Skill
 
-监控你电脑上所有 AI Agent 的 token 用量，统一看板展示。**插件化架构**——装了新 Agent，丢一个插件文件就能接入；**实时监控**——数据源一变，看板自动刷新；**Skill 接口**——写了 SKILL.md，任何 AI 都能自动发现并调用。
+监控你电脑上所有 AI Agent 的 token 用量，统一看板展示。**算力资源管理局**（花名：算力 HR · Token 劳务派遣）持续营业，替你看好每个 Agent 的 token 劳务合同。**插件化架构**——装了新 Agent，丢一个插件文件就能接入；**实时监控**——数据源一变，看板自动刷新；**Skill 接口**——写了 SKILL.md，任何 AI 都能自动发现并调用。
 
 ## 功能
 
@@ -16,14 +16,14 @@
 
 ## 快速开始
 
-1. 下载 `dist/agent-usage.exe`
+1. 下载 `dist/agent-usage-skill.exe`
 2. 双击运行，自动打开 http://127.0.0.1:8765/
 3. 看数
 
 命令行参数：
 
 ```
-agent-usage.exe [--port 8765] [--no-open] [--interval 5] [--full]
+agent-usage-skill.exe [--port 8765] [--no-open] [--interval 5] [--full]
 ```
 
 ## 内置 Agent 支持

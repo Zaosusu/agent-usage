@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-monitor.py — Agent Token Monitor 扫描入口（v2，委托 engine.core）。
+monitor.py — 算力资源管理局扫描入口（v2，委托 engine.core）。
 
 用法：
   python monitor.py scan [--agents codex,kimi] [--full]
@@ -47,7 +47,7 @@ def cmd_summary(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Agent Token Monitor')
+    ap = argparse.ArgumentParser(description='算力资源管理局')
     sub = ap.add_subparsers(dest='cmd')
 
     p = sub.add_parser('scan')

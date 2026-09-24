@@ -1,11 +1,13 @@
 ---
+# name 是机器标识符（与 GitHub 仓库名 Zaosusu/agent-usage-skill 对应），勿改；
+# 对外花名：算力资源管理局 / 算力资源管理 / 算力 HR · Token 劳务派遣
 name: agent-usage-skill
 description: 监控你电脑上所有 AI Agent（Codex、Claude Code、Kimi、WorkBuddy、豆包工作等）的 token 用量。当用户问"我用了多少 token"、"我的额度怎么消耗的"、"哪个 AI 用最多"、"我的 AI 用量统计"时使用。
 ---
 
-# Agent Usage Skill
+# 算力资源管理 · 算力 HR · Token 劳务派遣
 
-本地多 AI Agent Token 用量统一监控 Skill。插件化架构，任何 AI 编程工具都能接入。
+本地多 AI Agent Token 用量统一监控 Skill（算力资源管理局出品）。插件化架构，任何 AI 编程工具都能接入。
 
 ## 什么时候用
 

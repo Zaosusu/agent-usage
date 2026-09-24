@@ -1,8 +1,10 @@
 ﻿@echo off
 REM ============================================================
-REM  agent-usage-skill - Windows build script
+REM  算力资源管理（算力资源管理局 / 算力 HR · Token 劳务派遣）
+REM  Windows build script
 REM  Usage: double-click or run build.bat in terminal
 REM  Output: dist\agent-usage-skill.exe (single file)
+REM  Note: exe 名保持 ASCII —— cmd 按 GBK 码页解析 bat，中文名会乱码
 REM ============================================================
 cd /d "%~dp0"
 

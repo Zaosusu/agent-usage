@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-serve.py — Agent Token Monitor 本地服务（v2：HTTP + SSE 实时推送 + 插件 API）。
+serve.py — 算力资源管理局本地服务（v2：HTTP + SSE 实时推送 + 插件 API）。
 
 路由：
   /             -> web/dashboard.html（内嵌最新数据）
@@ -340,7 +340,7 @@ def main():
     import argparse
     from engine.watcher import Watcher
 
-    ap = argparse.ArgumentParser(description='Agent Token Monitor 本地服务')
+    ap = argparse.ArgumentParser(description='算力资源管理局 本地服务')
     ap.add_argument('--port', type=int, default=8765)
     ap.add_argument('--open', action='store_true', help='启动后自动打开浏览器')
     ap.add_argument('--interval', type=float, default=5.0, help='实时监控轮询间隔（秒）')
@@ -356,7 +356,7 @@ def main():
     watcher = Watcher(interval=args.interval, on_update=publish, scan_lock=scan_lock)
     watcher.start()
 
-    print('Agent Token Monitor 已启动:', url)
+    print('算力资源管理局 已启动:', url)
     print('实时监控：每 %ss 检测数据源变化，变化自动推送。按 Ctrl+C 停止。' % args.interval)
     if args.open:
         import webbrowser

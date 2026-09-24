@@ -1,12 +1,12 @@
 ---
 name: doubao-token-calibration
-description: 豆包工作（DoubaoWork）token 用量系数的校准与排障。当用户问"豆包用了多少 token"、"豆包系数对不对"、"豆包用量为什么是 0 / 对不上"、"更新一下豆包用量"，或 agent-usage-skill 看板里豆包数据异常时使用。已固化结论与一键脚本，不要重新推导。
+description: 豆包工作（DoubaoWork）token 用量系数的校准与排障。当用户问"豆包用了多少 token"、"豆包系数对不对"、"豆包用量为什么是 0 / 对不上"、"更新一下豆包用量"，或「算力资源管理局」看板里豆包数据异常时使用。已固化结论与一键脚本，不要重新推导。
 agent_created: true
 ---
 
 # 豆包 token 系数校准（已固化，勿重推）
 
-仓库：本仓库根目录（GitHub Zaosusu/agent-usage-skill）
+仓库：本仓库根目录 —— 算力资源管理（GitHub: Zaosusu/agent-usage-skill）
 系数推导全文：[`docs/DOUBAO.md`](DOUBAO.md)（「豆包 1% = 50 万 token 是怎么来的」）
 
 > **换算直接用 `总量 = timeline 百分比 × 500_000`，别再重推。** 本文是操作与排障手册。
@@ -392,7 +392,7 @@ tool schema 本地不落盘（trajectory 只存 tool_calls 不存 schema）。
 从早干到晚，把额度用到 100%，才显示 3200 多万，真的很不合理。」
 **结论：两个数字都对，但量纲不同，既不能相减也不能相比。**
 
-实测（`agent-usage-skill` 的 `data/usage.json` / `data/usage.db`，2026-09-22 11:09 快照）：
+实测（算力资源管理局本仓库的 `data/usage.json` / `data/usage.db`，2026-09-22 11:09 快照）：
 
 | | WorkBuddy 9/22 半日 | 豆包 9/21 全日 |
 |---|---|---|
@@ -402,7 +402,7 @@ tool schema 本地不落盘（trajectory 只存 tool_calls 不存 schema）。
 | output 占比 | **0.70%** | 本地无计数 |
 
 - **WorkBuddy 记传输量**：input 是「每轮把整段对话重新发一遍」的累加。
-  极端样本 `agent-usage-skill` 会话 `in=134,229,899 / out=1,103,230` = **122 : 1**；
+  极端样本「算力资源管理局」会话 `in=134,229,899 / out=1,103,230` = **122 : 1**；
   该值随轮次近似**二次增长**。全历史 cache_read 27.43 亿 ÷ input 38.75 亿 = **70.8%**。
 - **豆包记折后计价量**：重复上下文近乎免费，所以 % 涨得慢，× 50 万后数字天然小。
 - ⇒ **不是 5.8 倍的使用量差，是两种量纲的差。**
